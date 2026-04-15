@@ -10,9 +10,10 @@ Nhận task qua Telegram → tự phân tích, thiết kế, code, test, review 
 ## Stack
 - **Gateway:** OpenClaw + Telegram Bot
 - **Orchestrator:** MiniMax M2.7 (chạy 24/7, rẻ, nhanh)
-- **Architect / Reviewer:** Claude Sonnet 4.6
+- **Architect / Reviewer:** Claude Code CLI subprocess (OAuth, không dùng API key)
 - **Implementer / Tester:** Qwen Code CLI
-- **Agent framework:** PraisonAI (Phase 1–2), CrewAI (Phase 3 so sánh)
+- **Specialist agents (Phase 3):** PM, FE, BE, AI Engineer, DevOps
+- **Agent framework:** PraisonAI + Claude Code CLI hybrid
 - **Shared knowledge:** Filesystem MCP (local Windows)
 - **Python:** 3.12, venv tại `.venv/`
 - **Node.js:** v24.14.1
@@ -56,9 +57,15 @@ openclaw doctor --fix
 | File | Mục đích |
 |---|---|
 | `teamnot.py` | Main orchestration script — entry point |
+| `claude_worker.py` | Claude Code CLI wrapper (Phase 3) |
+| `cli.py` | Terminal CLI: run, queue, project, sprint, test-claude |
+| `task_queue.py` | Parallel task queue với persistence |
+| `cost_tracker.py` | Token usage và cost tracking |
 | `PROJECT_CONTEXT.md` | Tri thức cốt lõi, quy tắc, agent roles |
 | `TASK_BOARD.md` | Trạng thái task real-time (Orchestrator cập nhật) |
 | `AGENT_MEMORY.md` | Patterns, conventions tích lũy qua các task |
+| `SPRINTS/SPRINT_CURRENT.md` | Sprint board cho Phase 3 project mode |
+| `PROJECT_DOCS/` | API contracts, FE/AI requests, QA reports |
 | `.env` | API keys và config (KHÔNG commit) |
 | `.claude/agents/` | Sub-agent definitions cho Claude Code |
 

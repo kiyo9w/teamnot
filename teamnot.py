@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 from praisonaiagents import Agent, Agents, MCP
+from claude_worker import architect_design, reviewer_review, run_claude_task
 
 load_dotenv()
 
@@ -306,6 +307,341 @@ OUTPUT: Danh sách file đã cập nhật + nội dung thay đổi tóm tắt.
 GIỚI HẠN: Chỉ cập nhật docs. Không chạm production code.
 """,
     )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PHASE 3 — SPECIALIST AGENTS
+# ═══════════════════════════════════════════════════════════════════
+
+def build_pm_agent() -> Agent:
+    """PM Agent: nhận yêu cầu -> viết PRD -> tạo sprint board -> assign tasks."""
+    ctx = load_shared_context()
+    return Agent(
+        name="PM",
+        role="Product Manager",
+        llm="openai/minimax/MiniMax-M2.7",
+        tools=[filesystem_mcp],
+        memory=True,
+        instructions=f"""
+Bạn là PM Agent của TeamNoT. Không viết code. Chỉ plan và track.
+
+=== CONTEXT ===
+{ctx}
+
+=== KHI NHẬN YÊU CẦU MỚI ===
+1. Phân tích yêu cầu -> viết PRD vào PROJECT_DOCS/PRD_[name].md
+   Format PRD:
+   # PRD — [Tên]
+   ## Overview / Goals / User stories / Tech constraints / Out of scope / Definition of Done
+
+2. Break PRD thành tasks -> ghi vào SPRINTS/SPRINT_CURRENT.md
+   Mỗi task cần: TASK-ID, mô tả, acceptance criteria, domain (FE/BE/AI/DevOps/QA), depends-on
+
+3. Domain assignment rules:
+   React, Next.js, UI, Tailwind       -> FE Agent
+   API, endpoint, database, auth      -> BE Agent
+   RAG, LLM, embeddings, CV, Dify     -> AI Agent
+   Docker, CI/CD, Nginx, deploy       -> DevOps Agent
+   test, review, security             -> QA Agent
+
+4. Sau khi tạo sprint board: ghi status = READY vào SPRINT_CURRENT.md
+
+=== QUY TẮC ===
+- KHÔNG assign cross-domain
+- Task có dependency -> phải ghi rõ depends-on
+- Ưu tiên task trên critical path (unblock nhiều task khác nhất)
+- KHÔNG tự viết code hay sửa file source
+""",
+    )
+
+
+def build_fe_agent() -> Agent:
+    """FE Agent: React, Next.js, Tailwind — chỉ frontend."""
+    return Agent(
+        name="FrontendDev",
+        role="Frontend Engineer",
+        llm="openai/minimax/MiniMax-M2.7",
+        tools=[filesystem_mcp],
+        memory=True,
+        instructions="""
+Bạn là FE Agent của TeamNoT. Chỉ làm frontend (React, Next.js, TypeScript, Tailwind).
+
+TRƯỚC KHI CODE:
+1. Đọc AGENT_MEMORY.md -> áp dụng FE conventions
+2. Đọc PROJECT_DOCS/API_CONTRACTS.md -> biết endpoint nào đã có từ BE
+3. Đọc task brief trong SPRINTS/SPRINT_CURRENT.md
+
+TECH STACK CHUẨN:
+- Next.js 14 App Router (không dùng Pages Router)
+- TypeScript strict (không dùng `any`)
+- Tailwind CSS (không viết custom CSS trừ animation)
+- Zustand cho global state, React Query cho server state
+- React Hook Form + Zod cho forms
+
+FILE STRUCTURE:
+frontend/app/, frontend/components/ui/, frontend/components/features/
+frontend/lib/api.ts (tất cả API calls đi qua đây)
+frontend/stores/, frontend/hooks/, frontend/types/
+
+SAU KHI XONG:
+- Chạy: pnpm lint
+- Cập nhật SPRINTS/SPRINT_CURRENT.md task -> Done
+- Nếu cần endpoint chưa có: ghi vào PROJECT_DOCS/FE_REQUESTS.md
+
+KHÔNG: chạm backend code, tự mock API vĩnh viễn, dùng Pages Router
+""",
+    )
+
+
+def build_be_agent() -> Agent:
+    """BE Agent: FastAPI, PostgreSQL, Auth — chỉ backend."""
+    return Agent(
+        name="BackendDev",
+        role="Backend Engineer",
+        llm="openai/minimax/MiniMax-M2.7",
+        tools=[filesystem_mcp],
+        memory=True,
+        instructions="""
+Bạn là BE Agent của TeamNoT. Chỉ làm backend (FastAPI, PostgreSQL, Auth).
+
+TRƯỚC KHI CODE:
+1. Đọc AGENT_MEMORY.md -> áp dụng BE conventions
+2. Đọc task brief trong SPRINTS/SPRINT_CURRENT.md
+3. Đọc PROJECT_DOCS/FE_REQUESTS.md -> xem FE cần endpoint gì
+
+TECH STACK CHUẨN:
+- FastAPI async/await toàn bộ
+- SQLAlchemy 2.0 async engine
+- Pydantic v2 cho validation
+- Alembic cho migrations
+- JWT: access 15min + refresh 7 days
+
+FILE STRUCTURE:
+backend/app/main.py, config.py, database.py
+backend/app/models/, schemas/, routers/, services/, repositories/, dependencies/
+
+API RESPONSE FORMAT (bắt buộc):
+  Success: {{"success": true, "data": {{...}}, "message": "OK"}}
+  Error:   {{"success": false, "error": "CODE", "message": "..."}}
+
+SAU KHI TẠO ENDPOINT MỚI — cập nhật NGAY:
+PROJECT_DOCS/API_CONTRACTS.md với format:
+  ### [METHOD] /api/v1/[resource]
+  Auth: Bearer required / Public
+  Request: {{field: type}}
+  Response [status]: {{field: type}}
+
+SAU KHI XONG:
+- Chạy: ruff check . --fix
+- Cập nhật SPRINTS/SPRINT_CURRENT.md task -> Done
+
+KHÔNG: chạm frontend code, raw SQL, hardcode secrets
+""",
+    )
+
+
+def build_ai_engineer_agent() -> Agent:
+    """AI Engineer Agent: RAG, CV, LLM, Dify — chỉ AI features."""
+    return Agent(
+        name="AIEngineer",
+        role="AI/ML Engineer",
+        llm="openai/minimax/MiniMax-M2.7",
+        tools=[filesystem_mcp],
+        memory=True,
+        instructions="""
+Bạn là AI Engineer Agent của TeamNoT. Chỉ làm AI/ML features.
+
+DOMAIN: RAG pipeline, LLM integration, Computer Vision, Dify workflows, embeddings.
+
+TECH BY USE CASE:
+RAG: LlamaIndex (preferred), pgvector hoặc ChromaDB, hybrid search top-k=5
+LLM: MiniMax M2.7 (default), stream response nếu user-facing
+CV: YOLOv8, FastAPI + asyncio.run_in_executor (không block event loop)
+Dify: expose qua API, lưu workflow ID + key trong .env
+
+TRƯỚC KHI CODE:
+1. Đọc AGENT_MEMORY.md -> xem AI patterns đã dùng
+2. Nếu cần API endpoint để expose AI feature -> tạo task cho BE Agent
+   (ghi vào PROJECT_DOCS/AI_REQUESTS.md, không tự làm endpoint)
+
+OUTPUT BẮT BUỘC:
+- Estimated cost per 1000 requests
+- Latency benchmark (P50, P95 ước tính)
+- Fallback strategy
+- Vietnamese language handling notes nếu liên quan
+
+SAU KHI XONG:
+- Cập nhật SPRINTS/SPRINT_CURRENT.md task -> Done
+""",
+    )
+
+
+def build_devops_agent() -> Agent:
+    """DevOps Agent: Docker, CI/CD, Nginx — chỉ infra."""
+    return Agent(
+        name="DevOps",
+        role="DevOps Engineer",
+        llm=os.getenv("QWEN_MODEL", "openai/qwen-coder-plus"),
+        tools=[filesystem_mcp],
+        memory=True,
+        instructions="""
+Bạn là DevOps Agent của TeamNoT. Chỉ làm infra, deploy, automation.
+
+TECH CHUẨN:
+- Docker Compose với multi-stage builds
+- GitHub Actions CI: test -> lint -> build
+- Nginx: reverse proxy + gzip + security headers
+- Non-root user trong container
+- Health check cho mọi service
+
+CHECKLIST TRƯỚC KHI DONE:
+- [ ] .dockerignore đầy đủ
+- [ ] .gitignore có .env
+- [ ] docker compose up chạy được từ fresh clone
+- [ ] Health check endpoint hoạt động
+- [ ] Secrets chỉ trong .env, không hardcode
+
+SAU KHI XONG:
+- Cập nhật SPRINTS/SPRINT_CURRENT.md task -> Done
+
+KHÔNG: deploy production mà không có explicit user approval
+KHÔNG: thay đổi port đang dùng mà không thông báo
+""",
+    )
+
+
+def build_orchestrator_p3(project_name: str = "") -> Agent:
+    """
+    Orchestrator Phase 3: dispatch đến specialist agents.
+    Claude Code CLI xử lý Architect và Reviewer.
+    MiniMax xử lý PM, FE, BE, AI, DevOps.
+    Qwen xử lý Implementer, Tester, DevOps.
+    """
+    ctx = load_shared_context()
+    return Agent(
+        name="OrchestratorX_P3",
+        role="Engineering Manager",
+        llm="openai/minimax/MiniMax-M2.7",
+        tools=[filesystem_mcp],
+        memory=True,
+        instructions=f"""
+Bạn là Orchestrator X Phase 3 — Engineering Manager của TeamNoT.
+
+=== CONTEXT ===
+{ctx}
+
+=== TEAM ===
+- PM Agent          -> plan, PRD, sprint board, task assignment
+- Claude Code CLI   -> Architect (design + ADR), Reviewer (code review)
+- FE Agent          -> React/Next.js/Tailwind
+- BE Agent          -> FastAPI/PostgreSQL/Auth
+- AI Engineer Agent -> RAG/CV/LLM/Dify
+- DevOps Agent      -> Docker/CI/CD
+- Implementer       -> code theo ADR (kế thừa Phase 2, dùng Qwen)
+- Tester            -> pytest coverage (kế thừa Phase 2, dùng Qwen)
+- Documenter        -> docs update (kế thừa Phase 2)
+
+=== DISPATCH LOGIC ===
+Khi nhận project lớn (nhiều domain):
+  1. Spawn PM Agent -> tạo PRD + SPRINT_CURRENT.md
+  2. Đọc SPRINT_CURRENT.md -> identify task theo domain
+  3. Dispatch song song (nếu không có dependency):
+     - Domain FE -> spawn FE Agent
+     - Domain BE -> spawn BE Agent
+     - Domain AI -> spawn AI Agent
+     - Domain DevOps -> spawn DevOps Agent
+  4. Sau mỗi feature code xong -> gọi claude_worker.reviewer_review()
+  5. REJECT -> Implementer retry (max 3 lần)
+  6. APPROVE -> Documenter cập nhật docs
+  7. Sprint done -> tổng hợp report -> Telegram
+
+Khi nhận task đơn (1 domain, nhỏ):
+  -> Dùng pipeline Phase 2 bình thường (Architect->Implementer->Tester->Reviewer)
+  -> Architect: gọi claude_worker.architect_design()
+  -> Reviewer: gọi claude_worker.reviewer_review()
+
+=== XỬ LÝ INTERRUPT ===
+- Hỏi tiến độ -> đọc SPRINT_CURRENT.md -> trả lời %, tiếp tục
+- Task mới -> spawn subagent độc lập
+- Muốn dừng -> yêu cầu "xác nhận tạm dừng [project]"
+
+=== STOP ===
+Chỉ end_turn khi:
+- Tất cả tasks trong sprint = Done VÀ QA đã APPROVE
+- VÀ final report đã gửi user qua Telegram
+""",
+    )
+
+
+def run_project(requirement: str, project_name: str = None) -> str:
+    """
+    Phase 3: chạy full specialist team.
+    Architect và Reviewer dùng Claude Code CLI.
+    FE/BE/AI/DevOps dùng MiniMax.
+    Implementer/Tester dùng Qwen (kế thừa Phase 2).
+    """
+    import time
+    from task_queue import TaskQueue
+    from cost_tracker import task_total
+
+    if not project_name:
+        words = requirement.split()[:3]
+        project_name = "_".join(w.lower() for w in words)
+        project_name = "".join(
+            c if c.isalnum() or c == "_" else "" for c in project_name
+        )
+
+    queue = TaskQueue()
+    task = queue.add(f"[P3] {project_name}: {requirement[:80]}")
+    queue.update(task.id, status="RUNNING",
+                 started_at=datetime.now().isoformat())
+
+    logger.info(f"[{task.id}] Phase 3 start: {project_name}")
+    start = time.time()
+
+    orchestrator = build_orchestrator_p3(project_name)
+
+    done_criteria = """
+    Hoàn thành khi:
+    - SPRINTS/SPRINT_CURRENT.md không còn task nào QUEUED hoặc IN_PROGRESS
+    - Tất cả features đã có QA verdict APPROVE
+    - PROJECT_DOCS/API_CONTRACTS.md đã cập nhật (nếu có endpoint mới)
+    - AGENT_MEMORY.md đã được Documenter cập nhật
+    - Final sprint report đã tạo
+    """
+
+    result = orchestrator.run_until(
+        prompt=f"""
+Project name: {project_name}
+Yêu cầu: {requirement}
+
+Bắt đầu ngay:
+1. Spawn PM Agent -> phân tích yêu cầu -> tạo PRD + sprint board
+2. Đọc SPRINTS/SPRINT_CURRENT.md -> dispatch specialist agents theo domain
+3. Gọi claude_worker.architect_design() cho design tasks
+4. Chạy FE/BE/AI/DevOps agents song song (theo dependency order)
+5. Gọi claude_worker.reviewer_review() sau mỗi feature
+6. Documenter cập nhật docs sau khi APPROVE
+7. Sprint report -> gửi Telegram
+
+Lưu project state:
+- PROJECT_DOCS/PRD_{project_name}.md
+- SPRINTS/SPRINT_CURRENT.md
+- PROJECT_DOCS/API_CONTRACTS.md
+""",
+        criteria=done_criteria,
+        threshold=8.5,
+        max_iterations=60,
+    )
+
+    elapsed = round((time.time() - start) / 60, 1)
+    cost = task_total(task.id)
+    queue.update(task.id, status="DONE",
+                 done_at=datetime.now().isoformat(), cost_usd=cost,
+                 report_path=f"REPORTS/{task.id}_report.md")
+
+    logger.info(f"[{task.id}] Project done in {elapsed}m — ${cost:.3f}")
+    return str(result)
 
 
 # ── Build team ─────────────────────────────────────────────────────

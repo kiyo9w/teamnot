@@ -192,3 +192,68 @@ python cli.py resume TASK-ID                # tiếp tục task đã pause
 - `run_queue_loop()` là blocking — dùng trong background process
 - ThreadPoolExecutor không dùng ở đây — dùng threading.Thread trực tiếp để có daemon=True
 - TASK-ID format: `TASK-YYYYMMDD-HHMMSS`
+
+---
+
+## Phase 3 — 2026-04-15
+
+### Kiến trúc agents Phase 3
+- Claude Code CLI (subprocess): Architect, Reviewer — dùng `claude -p`
+- MiniMax M2.7: Orchestrator P3, PM, FE, BE, AI Engineer
+- Qwen Coder Plus: Implementer, Tester, DevOps (kế thừa Phase 2)
+- MiniMax M2.7-highspeed: Researcher, Documenter (kế thừa Phase 2)
+
+### Lý do dùng Claude Code CLI thay vì API
+- ANTHROPIC_API_KEY không dùng trong môi trường này
+- claude CLI có sẵn (v2.1.109), có full file system access tự nhiên
+- Claude Code hiểu CLAUDE.md, AGENT_MEMORY.md tự động
+- Phù hợp cho Architect (cần đọc nhiều file) và Reviewer (cần read codebase)
+- Flags: `-p --model sonnet --max-budget-usd X --dangerously-skip-permissions --no-session-persistence`
+
+### Claude Code CLI usage
+```python
+from claude_worker import architect_design, reviewer_review, run_claude_task
+
+# Tạo ADR
+adr = architect_design(task_id, description)
+
+# Review code
+review = reviewer_review(task_id, branch_name)
+# Returns: {"verdict": "APPROVE"|"REJECT", "report": str, "issues": list}
+
+# Generic task
+output = run_claude_task("prompt", model="sonnet", max_budget_usd=2.0)
+```
+
+### Domain specialist assignment
+| Domain | Agent | Scope |
+|---|---|---|
+| FE | FrontendDev | React, Next.js, TypeScript, Tailwind, Zustand, React Query |
+| BE | BackendDev | FastAPI, SQLAlchemy, PostgreSQL, Redis, Celery, JWT, Alembic |
+| AI | AIEngineer | RAG, LlamaIndex, embeddings, pgvector, YOLOv8, Dify, LLM |
+| DevOps | DevOps | Docker Compose, GitHub Actions, Nginx, multi-stage builds |
+| QA | Reviewer (Claude CLI) | pytest, coverage, security review, code review checklist |
+
+### Shared state files Phase 3
+| File | Owner | Purpose |
+|---|---|---|
+| `PROJECT_DOCS/PRD_[name].md` | PM Agent | Product requirements |
+| `PROJECT_DOCS/API_CONTRACTS.md` | BE Agent | BE<->FE interface contract |
+| `PROJECT_DOCS/FE_REQUESTS.md` | FE Agent | FE->BE endpoint requests |
+| `PROJECT_DOCS/AI_REQUESTS.md` | AI Agent | AI->BE endpoint requests |
+| `SPRINTS/SPRINT_CURRENT.md` | PM Agent | Sprint board real-time |
+| `PROJECT_DOCS/QA_REPORTS/` | Reviewer | QA review reports |
+
+### CLI commands Phase 3
+```
+python cli.py project "<yêu cầu>"       # full project mode
+python cli.py project "<yêu cầu>" name  # project với tên custom
+python cli.py sprint                     # xem sprint status
+python cli.py test-claude                # kiểm tra Claude CLI
+```
+
+### Domain isolation rules
+- FE Agent KHÔNG chạm: backend/, app/, database.py
+- BE Agent KHÔNG chạm: frontend/, components/, pages/
+- AI Agent tạo API endpoint: ghi vào AI_REQUESTS.md -> task riêng cho BE
+- DevOps KHÔNG sửa business logic code

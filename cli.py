@@ -12,6 +12,7 @@ Cách dùng:
   python cli.py resume TASK-20260414-123456
 """
 import sys
+import os
 import io
 import logging
 from dotenv import load_dotenv
@@ -102,21 +103,71 @@ def cmd_resume(task_id: str):
         print(f"Cannot resume {task_id} (not PAUSED or not found)")
 
 
+def cmd_project(requirement: str, project_name: str = None):
+    """Phase 3: full specialist team cho project nhiều domain."""
+    from teamnot import run_project
+
+    if not project_name:
+        project_name = "_".join(requirement.split()[:3]).lower()
+        project_name = "".join(
+            c if c.isalnum() or c == "_" else "" for c in project_name
+        )
+
+    print(f"TeamNoT Phase 3")
+    print(f"Project: {project_name}")
+    print(f"Team: PM + Claude(Architect/Reviewer) + FE + BE + AI + DevOps + QA")
+    print(f"Telegram sẽ nhận báo cáo khi sprint xong.\n")
+
+    report = run_project(requirement, project_name)
+    print("\n=== SPRINT REPORT ===\n", report)
+
+
+def cmd_sprint_status():
+    """Xem trạng thái sprint hiện tại."""
+    from pathlib import Path
+    root = Path(os.getenv("TEAMNOT_ROOT", "."))
+    sprint = root / "SPRINTS" / "SPRINT_CURRENT.md"
+    if sprint.exists():
+        print(sprint.read_text(encoding="utf-8"))
+    else:
+        print("No active sprint.")
+        print("Run: python cli.py project '<requirement>'")
+
+
+def cmd_test_claude():
+    """Kiểm tra Claude Code CLI hoạt động không."""
+    from claude_worker import run_claude_task
+    print("Testing Claude Code CLI...")
+    result = run_claude_task(
+        "Reply with exactly 3 words: CLAUDE CLI OK",
+        max_budget_usd=0.05,
+        timeout=30,
+    )
+    print("Result:", result[:200])
+    if "CLAUDE" in result.upper() and len(result) > 5:
+        print("Claude Code CLI OK")
+    else:
+        print("Unexpected output — check manually")
+
+
 COMMANDS = {
-    "run":      (cmd_run,            "run <task>"),
-    "queue":    (cmd_queue,          "queue <task1> [task2] ..."),
-    "queue-p":  (cmd_queue_priority, "queue-p <task> [--priority 1-10]"),
-    "status":   (cmd_status,         "status"),
-    "cost":     (cmd_cost,           "cost"),
-    "loop":     (cmd_loop,           "loop"),
-    "pause":    (cmd_pause,          "pause <task-id>"),
-    "resume":   (cmd_resume,         "resume <task-id>"),
+    "run":         (cmd_run,            "run <task>"),
+    "queue":       (cmd_queue,          "queue <task1> [task2] ..."),
+    "queue-p":     (cmd_queue_priority, "queue-p <task> [--priority 1-10]"),
+    "status":      (cmd_status,         "status"),
+    "cost":        (cmd_cost,           "cost"),
+    "loop":        (cmd_loop,           "loop"),
+    "pause":       (cmd_pause,          "pause <task-id>"),
+    "resume":      (cmd_resume,         "resume <task-id>"),
+    "project":     (cmd_project,        "project '<requirement>' [project_name]"),
+    "sprint":      (cmd_sprint_status,  "sprint"),
+    "test-claude": (cmd_test_claude,    "test-claude"),
 }
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
-        print("TeamNoT CLI — Phase 2\n")
+        print("TeamNoT CLI — Phase 3\n")
         print("Commands:")
         for name, (_, usage) in COMMANDS.items():
             print(f"  python cli.py {usage}")
@@ -136,5 +187,9 @@ if __name__ == "__main__":
     fn = COMMANDS[cmd][0]
     if cmd == "queue-p":
         fn(*args, priority=priority)
+    elif cmd == "project":
+        requirement = args[0] if args else ""
+        pname = args[1] if len(args) > 1 else None
+        fn(requirement, pname)
     else:
         fn(*args)
