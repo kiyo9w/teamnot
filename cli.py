@@ -70,9 +70,9 @@ def cmd_status():
 
 
 def cmd_cost():
-    """Hiển thị tóm tắt chi phí theo task."""
-    from cost_tracker import summary
-    print(summary())
+    """Xem tổng resource usage: API cost + session windows."""
+    from cost_tracker import full_summary
+    print(full_summary())
 
 
 def cmd_loop():
@@ -140,7 +140,6 @@ def cmd_test_claude():
     print("Testing Claude Code CLI...")
     result = run_claude_task(
         "Reply with exactly 3 words: CLAUDE CLI OK",
-        max_budget_usd=0.05,
         timeout=30,
     )
     print("Result:", result[:200])
@@ -148,6 +147,38 @@ def cmd_test_claude():
         print("Claude Code CLI OK")
     else:
         print("Unexpected output — check manually")
+
+
+def cmd_sessions():
+    """Xem trạng thái session windows của Claude và Qwen CLI."""
+    from session_manager import get_manager
+    mgr = get_manager()
+    print(mgr.status_all())
+    print()
+    info = mgr.check_window("claude")
+    if info["should_pause"]:
+        avail = mgr.get_next_available_claude()
+        print(f"Claude session còn {info['remaining_minutes']}m — "
+              f"không nên bắt task mới cần Architect/Reviewer.")
+        print(f"   Session mới lúc {avail.get('available_at', '?')}")
+    elif info["warn"]:
+        print(f"Claude session còn {info['remaining_minutes']}m — "
+              f"hãy hoàn thành task hiện tại trước khi bắt task mới.")
+
+
+def cmd_reset_session(provider: str = "claude"):
+    """Reset session window thủ công (dùng khi đã login lại CLI)."""
+    from session_manager import get_manager, SessionWindow, SESSION_WINDOWS
+    mgr = get_manager()
+    cfg = SESSION_WINDOWS.get(provider, {"window_hours": 5})
+    from datetime import datetime as dt
+    mgr._sessions[provider] = SessionWindow(
+        provider=provider,
+        started_at=dt.now().isoformat(),
+        window_hours=cfg["window_hours"],
+    )
+    mgr._save()
+    print(f"Session reset: {provider} — {cfg['window_hours']}h window from now")
 
 
 COMMANDS = {
@@ -159,9 +190,11 @@ COMMANDS = {
     "loop":        (cmd_loop,           "loop"),
     "pause":       (cmd_pause,          "pause <task-id>"),
     "resume":      (cmd_resume,         "resume <task-id>"),
-    "project":     (cmd_project,        "project '<requirement>' [project_name]"),
-    "sprint":      (cmd_sprint_status,  "sprint"),
-    "test-claude": (cmd_test_claude,    "test-claude"),
+    "project":       (cmd_project,        "project '<requirement>' [project_name]"),
+    "sprint":        (cmd_sprint_status,  "sprint"),
+    "test-claude":   (cmd_test_claude,    "test-claude"),
+    "sessions":      (cmd_sessions,       "sessions"),
+    "reset-session": (cmd_reset_session,  "reset-session [claude|qwen|minimax]"),
 }
 
 

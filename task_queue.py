@@ -17,7 +17,6 @@ logger = logging.getLogger("TeamNoT.Queue")
 ROOT = Path(os.getenv("TEAMNOT_ROOT",
             r"C:\Users\Jenky - MiniPC\Desktop\Project\TeamNoT"))
 QUEUE_FILE   = ROOT / "task_queue.json"
-COST_LIMIT   = float(os.getenv("TEAMNOT_COST_LIMIT", "5.0"))
 MAX_PARALLEL = int(os.getenv("TEAMNOT_MAX_PARALLEL", "3"))
 
 

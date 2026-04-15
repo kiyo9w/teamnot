@@ -140,7 +140,7 @@ project/
 | Task completion time (full feature) | — | < 60 min |
 | Code review pass rate (first attempt) | — | > 70% |
 | Test coverage | — | > 60% |
-| API cost per task | — | < $1.50 |
+| MiniMax API cost per task | — | < $0.50 (Claude/Qwen: subscription, no cost) |
 
 ---
 
@@ -208,21 +208,25 @@ python cli.py resume TASK-ID                # tiếp tục task đã pause
 - claude CLI có sẵn (v2.1.109), có full file system access tự nhiên
 - Claude Code hiểu CLAUDE.md, AGENT_MEMORY.md tự động
 - Phù hợp cho Architect (cần đọc nhiều file) và Reviewer (cần read codebase)
-- Flags: `-p --model sonnet --max-budget-usd X --dangerously-skip-permissions --no-session-persistence`
+- Flags: `-p --model sonnet --permission-mode acceptEdits --no-session-persistence`
 
 ### Claude Code CLI usage
 ```python
 from claude_worker import architect_design, reviewer_review, run_claude_task
 
-# Tạo ADR
+# Tạo ADR (session-managed, no token cost)
 adr = architect_design(task_id, description)
 
-# Review code
+# Review code (returns PENDING if session low)
 review = reviewer_review(task_id, branch_name)
-# Returns: {"verdict": "APPROVE"|"REJECT", "report": str, "issues": list}
+# Returns: {"verdict": "APPROVE"|"REJECT"|"PENDING", "report": str, "issues": list}
 
 # Generic task
-output = run_claude_task("prompt", model="sonnet", max_budget_usd=2.0)
+output = run_claude_task("prompt", model="sonnet", timeout=300)
+
+# Session-safe wrappers (in teamnot.py)
+from teamnot import _safe_architect_design, _safe_reviewer_review
+# These auto-fallback when Claude session < 10min
 ```
 
 ### Domain specialist assignment
@@ -257,3 +261,39 @@ python cli.py test-claude                # kiểm tra Claude CLI
 - BE Agent KHÔNG chạm: frontend/, components/, pages/
 - AI Agent tạo API endpoint: ghi vào AI_REQUESTS.md -> task riêng cho BE
 - DevOps KHÔNG sửa business logic code
+
+---
+
+## Session management — cập nhật 2026-04-16
+
+### Thực tế sử dụng
+- Claude Code CLI: OAuth tài khoản cá nhân, session ~5h, sau đó tự refresh
+- Qwen Code CLI: subscription tài khoản, ~8h window, không tính token cost
+- MiniMax: API key, có cost ($0.30-$0.60/1M tokens) — vẫn track bình thường
+
+### Không còn dùng $5/task hard limit
+Trước đây dừng task khi cost > $5 — không còn phù hợp vì Claude/Qwen dùng subscription.
+Giờ chỉ track: MiniMax API cost (để theo dõi), Claude/Qwen CLI call count + session time.
+
+### Session window behavior
+- Claude < 10m còn lại: KHÔNG bắt task mới cần Architect/Reviewer, trả PENDING
+- Claude 10-30m còn lại: cảnh báo, hoàn thành task hiện tại trước
+- Claude > 30m: bình thường
+- Khi session hết: CLI tự refresh (không cần làm gì), gọi reset-session để sync state
+
+### Fallback khi Claude session thấp
+- Architect: trả `[FALLBACK_DESIGN]` — Orchestrator MiniMax M2.7 tự design (chất lượng thấp hơn)
+- Reviewer: trả verdict `PENDING` — task được queue, review sau khi session refresh
+- Ưu tiên: schedule task nặng (Architect/Review) vào đầu session, task nhẹ về cuối
+
+### CLI commands liên quan session
+```
+python cli.py sessions                    # xem thời gian còn lại
+python cli.py cost                        # API cost + session summary (hybrid)
+python cli.py reset-session claude        # reset sau khi login lại
+python cli.py reset-session qwen
+```
+
+### Files mới
+- `session_manager.py` — SessionManager singleton, track session windows
+- `LOGS/session_state.json` — persistent session state (auto-created)

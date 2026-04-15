@@ -11,6 +11,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from praisonaiagents import Agent, Agents, MCP
 from claude_worker import architect_design, reviewer_review, run_claude_task
+from session_manager import get_manager as _get_session_manager
+from cost_tracker import log_cli_call
 
 load_dotenv()
 
@@ -582,7 +584,6 @@ def run_project(requirement: str, project_name: str = None) -> str:
     """
     import time
     from task_queue import TaskQueue
-    from cost_tracker import task_total
 
     if not project_name:
         words = requirement.split()[:3]
@@ -635,13 +636,62 @@ Lưu project state:
     )
 
     elapsed = round((time.time() - start) / 60, 1)
-    cost = task_total(task.id)
     queue.update(task.id, status="DONE",
-                 done_at=datetime.now().isoformat(), cost_usd=cost,
+                 done_at=datetime.now().isoformat(),
                  report_path=f"REPORTS/{task.id}_report.md")
 
-    logger.info(f"[{task.id}] Project done in {elapsed}m — ${cost:.3f}")
+    logger.info(f"[{task.id}] Project done in {elapsed}m")
     return str(result)
+
+
+# ── Session-aware wrappers ─────────────────────────────────────────
+
+def _safe_architect_design(task_id: str, description: str,
+                           project_dir: Path = None) -> str:
+    """Architect với fallback: Claude CLI -> MiniMax nếu session thấp."""
+    smgr = _get_session_manager()
+    info = smgr.check_window("claude")
+
+    if info["should_pause"]:
+        logger.warning(
+            f"[{task_id}] Claude session low ({info['remaining_minutes']}m) "
+            f"— dùng Orchestrator MiniMax cho design"
+        )
+        return (
+            f"[FALLBACK_DESIGN] Claude session < 10m. "
+            f"Orchestrator sẽ design với MiniMax M2.7."
+        )
+
+    log_cli_call(task_id, "claude")
+    return architect_design(task_id, description, project_dir)
+
+
+def _safe_reviewer_review(task_id: str, branch: str,
+                          project_dir: Path = None) -> dict:
+    """Reviewer với fallback: Claude CLI -> queue lại nếu session thấp."""
+    smgr = _get_session_manager()
+    info = smgr.check_window("claude")
+
+    if info["should_pause"]:
+        avail = smgr.get_next_available_claude()
+        logger.warning(
+            f"[{task_id}] Claude session low — "
+            f"review queued until {avail.get('available_at')}"
+        )
+        return {
+            "verdict": "PENDING",
+            "report": (
+                f"Review queued — Claude session refresh "
+                f"lúc {avail.get('available_at')}"
+            ),
+            "issues": [],
+            "task_id": task_id,
+            "branch": branch,
+            "reviewed_at": datetime.now().isoformat(),
+        }
+
+    log_cli_call(task_id, "claude")
+    return reviewer_review(task_id, branch, project_dir)
 
 
 # ── Build team ─────────────────────────────────────────────────────
@@ -669,7 +719,6 @@ def run_task(task, task_id: str = None) -> str:
         task_id: optional override cho task ID (khi gọi bằng string)
     """
     import time
-    from cost_tracker import task_total
 
     # Hỗ trợ cả string (gọi trực tiếp) và QueuedTask object (từ queue)
     if isinstance(task, str):
@@ -682,6 +731,18 @@ def run_task(task, task_id: str = None) -> str:
 
     logger.info(f"[{task_id}] Pipeline start: {description[:80]}")
     start_time = time.time()
+
+    # Pre-flight: kiểm tra session windows
+    smgr = _get_session_manager()
+    smgr.refresh_if_expired("claude")
+    smgr.refresh_if_expired("qwen")
+    claude_info = smgr.check_window("claude")
+    if claude_info["should_pause"]:
+        avail = smgr.get_next_available_claude()
+        logger.warning(
+            f"[{task_id}] Claude session chỉ còn {claude_info['remaining_minutes']}m. "
+            f"Architect/Reviewer sẽ dùng fallback nếu cần."
+        )
 
     orchestrator = build_orchestrator()
 
@@ -718,7 +779,7 @@ Tạo Final Report tại REPORTS/{task_id}.md khi hoàn thành.
     )
 
     elapsed = round((time.time() - start_time) / 60, 1)
-    logger.info(f"[{task_id}] Done in {elapsed} min — cost: ${task_total(task_id):.3f}")
+    logger.info(f"[{task_id}] Done in {elapsed} min")
     return str(result)
 
 

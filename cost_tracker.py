@@ -1,5 +1,7 @@
 """
-TeamNoT Cost Tracker — theo dõi token usage và chi phí từng task.
+TeamNoT Cost Tracker — hybrid tracking.
+- MiniMax: API cost (token-based, USD)
+- Claude/Qwen CLI: call count only (OAuth subscription, no token cost)
 Ghi vào LOGS/cost_tracking.json.
 """
 import json
@@ -12,8 +14,7 @@ logger = logging.getLogger("TeamNoT.Cost")
 
 ROOT = Path(os.getenv("TEAMNOT_ROOT",
             r"C:\Users\Jenky - MiniPC\Desktop\Project\TeamNoT"))
-COST_FILE  = ROOT / "LOGS" / "cost_tracking.json"
-COST_LIMIT = float(os.getenv("TEAMNOT_COST_LIMIT", "5.0"))
+COST_FILE = ROOT / "LOGS" / "cost_tracking.json"
 
 # USD per 1M tokens — cập nhật khi giá thay đổi
 PRICES = {
@@ -70,10 +71,6 @@ def log_usage(task_id: str, model: str,
         sum(t["cost_usd"] for t in data["tasks"]), 4)
     data["last_updated"] = datetime.now().strftime("%Y-%m-%d")
     _save(data)
-
-    if cost > COST_LIMIT:
-        logger.warning(
-            f"[{task_id}] Cost ${cost:.3f} vượt limit ${COST_LIMIT}")
     return cost
 
 
@@ -100,17 +97,60 @@ def summary() -> str:
     return "\n".join(lines)
 
 
-def check_limit(task_id: str, estimated_cost: float) -> bool:
-    """
-    Kiểm tra xem estimated_cost có vượt COST_LIMIT không.
+# ── Session-based tracking cho CLI models ─────────────────────────
 
-    Returns:
-        True nếu an toàn (chưa vượt), False nếu vượt limit.
+def log_cli_call(task_id: str, provider: str, duration_seconds: float = 0):
     """
-    current = task_total(task_id)
-    total   = current + estimated_cost
-    if total > COST_LIMIT:
-        logger.warning(
-            f"[{task_id}] Estimated total ${total:.3f} vượt limit ${COST_LIMIT}")
-        return False
-    return True
+    Ghi nhận CLI call (claude / qwen) — không có token cost.
+    Chỉ track số lần gọi và thời gian để phân tích.
+    """
+    data = _load()
+    if "cli_calls" not in data:
+        data["cli_calls"] = []
+    data["cli_calls"].append({
+        "task_id": task_id,
+        "provider": provider,
+        "duration_seconds": round(duration_seconds, 1),
+        "timestamp": datetime.now().isoformat(),
+        "note": "OAuth subscription — no token cost",
+    })
+    _save(data)
+
+
+def full_summary() -> str:
+    """Summary tổng hợp: API cost + CLI session usage."""
+    from session_manager import get_manager
+    mgr = get_manager()
+    data = _load()
+
+    lines = ["=== TeamNoT Resource Usage ===", ""]
+
+    # API cost (MiniMax)
+    api_cost = data.get("total_cost_usd", 0)
+    api_tasks = data.get("tasks", [])
+    lines.append(f"MiniMax API cost: ${api_cost:.4f} USD ({len(api_tasks)} calls)")
+
+    # CLI calls
+    cli_calls = data.get("cli_calls", [])
+    if cli_calls:
+        claude_calls = sum(1 for c in cli_calls if c["provider"] == "claude")
+        qwen_calls = sum(1 for c in cli_calls if c["provider"] == "qwen")
+        lines.append(f"Claude CLI calls: {claude_calls} (OAuth — no cost)")
+        lines.append(f"Qwen CLI calls:   {qwen_calls} (subscription — no cost)")
+    else:
+        lines.append("Claude/Qwen CLI: no calls yet")
+
+    lines.append("")
+    lines.append(mgr.status_all())
+
+    # Per-task breakdown (API only)
+    if api_tasks:
+        by_task: dict = {}
+        for t in api_tasks:
+            by_task[t["task_id"]] = by_task.get(t["task_id"], 0.0) + t["cost_usd"]
+        lines.append("")
+        lines.append("API cost by task:")
+        for tid, cost in sorted(by_task.items(), key=lambda x: -x[1]):
+            lines.append(f"  {tid}: ${cost:.4f}")
+
+    return "\n".join(lines)
