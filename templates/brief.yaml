@@ -1,0 +1,91 @@
+schema_version: "2.0"
+
+# ── Project --------------------------------------------------------------------
+project:
+  name: my-project
+  path: .                              # absolute or relative; resolved by loader
+  language: [python]
+  stack: [fastapi]
+  conventions_file: .teamnot/conventions.md
+  memory_file: .teamnot/memory.md
+
+# ── Task -----------------------------------------------------------------------
+task:
+  id: TASK-EXAMPLE-001
+  title: Add /health endpoint
+  description: |
+    Add a GET /health endpoint to the FastAPI app that returns
+    {"status": "ok"} with a 200 status code. Include a basic test.
+  constraints:
+    no_deploy: true
+    no_main_commit: true
+    no_secrets_in_code: true
+    no_force_push: true
+    no_destructive_git: true
+    extra: []
+  references: []
+
+# ── Definition of Done ---------------------------------------------------------
+# Every required check must pass before the loop stops. Machine checks run
+# first; the LLM judge runs only after machine checks pass (so we don't burn
+# API spend reviewing code that already failed lint or tests).
+definition_of_done:
+  require_all_pass: true
+  llm_judge_required: true
+  checks:
+    - name: lint passes
+      run: ruff check .
+      expect_exit: 0
+    - name: tests pass
+      run: pytest -q
+      expect_exit: 0
+    - name: health endpoint responds
+      http_check:
+        url: http://localhost:8000/health
+        status: 200
+        timeout_s: 5
+      required: false                  # nice-to-have, won't block
+    - name: reviewer approval
+      llm_judge: |
+        Check that the implementation:
+        - matches the task description
+        - has no obvious security issues
+        - follows .teamnot/conventions.md
+        Output APPROVE or REJECT with a one-line reason.
+
+# ── Deliverable ----------------------------------------------------------------
+deliverable:
+  type: feature_branch                 # feature_branch | pull_request | files | tarball | report_only
+  branch: null                         # defaults to feature/<task.id>
+  base: main
+  push_remote: false                   # set true to auto-push
+  report_to: stdout                    # stdout | file | telegram | webhook
+  report_path: null
+  webhook_url: null
+  telegram_chat_id: null
+
+# ── Budget + cost guard --------------------------------------------------------
+# The cost guard halts the worker before it can drain a metered API balance.
+#
+#   max_usd                — HARD cap on combined metered spend
+#   cost_warn_pct          — log a warning when usage crosses this fraction
+#   cost_pause_pct         — refuse new metered calls (subscription work continues)
+#   cost_hard_stop_pct     — halt the whole worker
+#
+# allowed_metered_workers is an EXPLICIT allow-list. Leave it empty for fully
+# autonomous runs that should only use subscription (Claude Code CLI, Codex CLI)
+# or local (Ollama) workers — the safest default.
+budget:
+  max_minutes: 120
+  max_usd: 5.0
+  max_retries: 5
+  max_dod_attempts: 10
+  cost_guard_enabled: true
+  cost_warn_pct: 0.7
+  cost_pause_pct: 0.9
+  cost_hard_stop_pct: 1.0
+  require_explicit_api_optin: true
+  allowed_metered_workers: []          # e.g. [minimax] to opt in
+
+notes: null
+metadata: {}

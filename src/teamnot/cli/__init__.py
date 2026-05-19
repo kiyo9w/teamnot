@@ -1,0 +1,1 @@
+"""TeamNoT CLI package."""

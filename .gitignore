@@ -1,13 +1,67 @@
-.env
-.venv/
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-LOGS/
-.openclaw/
-*.egg-info/
-dist/
+*.py[cod]
+*$py.class
+*.so
+.Python
 build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Test / lint caches
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# TeamNoT runtime state (in the package repo)
+LOGS/
+REPORTS/
+PROJECT_DOCS/PLANS/
+ADRs/TASK-*.md
+SPRINTS/
+.tmp_*/
+*.tmp_demo*
+task_queue*.json
+.openclaw/
+
+# Per-project workspace (when a project sits next to the repo)
+.teamnot/checkpoints/
+.teamnot/logs/
+.teamnot/reports/
+.teamnot/plans/
+.teamnot/qa_reports/
+.teamnot/worker.lock
+
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Lockfiles produced by `make freeze`
+requirements.lock.txt
+
+# Legacy v1 artifacts — kept on disk for reference, not committed
+legacy/
+*_legacy.py
