@@ -1,6 +1,8 @@
 """Experience runners for customer-loop evidence collection."""
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
 from collections.abc import Callable, Sequence
@@ -69,7 +71,7 @@ class OpenClawWindowsCDPRunner:
         wrapper_path: str | Path = "scripts/winbrowser",
         command_runner: CommandRunner | None = None,
     ):
-        self.wrapper_path = Path(wrapper_path)
+        self.wrapper_path = _resolve_wrapper_path(wrapper_path)
         self.command_runner = command_runner or self._default_runner
 
     def run(
@@ -84,25 +86,44 @@ class OpenClawWindowsCDPRunner:
                 "OpenClaw Windows CDP runner requires scripts/winbrowser. "
                 "Install or provide the wrapper, or use --runner manual --evidence FILE."
             )
-        screenshot = out_dir / "screenshots" / "openclaw-cdp.png"
-        screenshot.parent.mkdir(parents=True, exist_ok=True)
+        screenshots = out_dir / "screenshots"
+        screenshots.mkdir(parents=True, exist_ok=True)
+        first_impression = screenshots / "first-impression.png"
+        full_page = screenshots / "full-page.png"
+        first_impression_out = _path_for_windows_wrapper(first_impression)
+        full_page_out = _path_for_windows_wrapper(full_page)
         self._run(["--action", "status"])
-        self._run(["--action", "navigate", "--url", str(target.url)])
-        self._run(["--action", "screenshot", "--out", str(screenshot)])
-        title = self._run(["--action", "eval", "--expr", "document.title"]).stdout.strip()
+        navigate = _parse_json_stdout(self._run(["--action", "navigate", "--url", str(target.url)]))
+        self._run(["--action", "screenshot", "--out", first_impression_out])
+        self._run(["--action", "screenshot", "--out", full_page_out, "--full-page"])
+        probe = _parse_json_stdout(self._run(["--action", "eval", "--expr", _CUSTOMER_PROBE_JS]))
+        result = probe.get("result", probe)
+        markers, findings = _build_customer_findings(result, target, profile, plan)
         evidence = CustomerEvidence(
             kind="browser_observation",
-            path=str(screenshot),
-            screenshot_paths=[str(screenshot)],
-            observed_behavior=f"Browser reached {target.url}. Title: {title}",
+            path=str(first_impression),
+            screenshot_paths=[str(first_impression), str(full_page)],
+            observed_behavior=_summarize_probe(result, markers),
+            raw_excerpt="\n".join(markers),
+            metadata={
+                "runner": "openclaw-windows-cdp",
+                "rubric": "customer-testing-openclaw-lite",
+                "navigate": navigate,
+                "probe": result,
+            },
         )
+        for finding in findings:
+            finding.evidence.append(evidence)
         return CustomerReport(
             profile=profile,
             target=target,
             plan=plan,
-            findings=[],
+            findings=findings,
             evidence=[evidence],
-            summary=evidence.observed_behavior,
+            summary=(
+                "Rich customer browser test completed with Windows CDP. "
+                f"{len(findings)} customer-impact finding(s) identified."
+            ),
         )
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -131,6 +152,290 @@ def _first_nonempty_line(text: str) -> str:
         if cleaned:
             return cleaned
     return ""
+
+
+def _parse_json_stdout(result: subprocess.CompletedProcess[str]) -> dict:
+    try:
+        parsed = json.loads((result.stdout or "").strip() or "{}")
+    except json.JSONDecodeError as exc:
+        raise CustomerLoopRunnerError(f"OpenClaw wrapper returned non-JSON output: {result.stdout[:200]}") from exc
+    if isinstance(parsed, dict) and parsed.get("ok") is False:
+        raise CustomerLoopRunnerError(f"OpenClaw wrapper reported failure: {parsed}")
+    return parsed if isinstance(parsed, dict) else {"result": parsed}
+
+
+def _resolve_wrapper_path(wrapper_path: str | Path) -> Path:
+    path = Path(wrapper_path).expanduser()
+    if path.is_absolute() or path.exists():
+        return path
+    candidates = [
+        Path(os.environ.get("OPENCLAW_WORKSPACE", "")) / path if os.environ.get("OPENCLAW_WORKSPACE") else None,
+        Path.cwd() / path,
+        *(parent / path for parent in Path.cwd().parents),
+    ]
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return candidate
+    return path
+
+
+def _path_for_windows_wrapper(path: Path) -> str:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        return str(expanded)
+    try:
+        converted = subprocess.run(
+            ["wslpath", "-w", str(expanded)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return str(expanded)
+    return converted.stdout.strip() if converted.returncode == 0 and converted.stdout.strip() else str(expanded)
+
+
+_CUSTOMER_PROBE_JS = r"""(() => {
+  const textOf = (el) => (el?.innerText || el?.textContent || "").replace(/\s+/g, " ").trim();
+  const pick = (selector, limit = 20) =>
+    Array.from(document.querySelectorAll(selector)).slice(0, limit).map((el) => textOf(el)).filter(Boolean);
+  const controls = Array.from(document.querySelectorAll("input, textarea, select, button")).slice(0, 40).map((el) => {
+    const id = el.getAttribute("id") || "";
+    const label = id ? textOf(document.querySelector(`label[for="${CSS.escape(id)}"]`)) : "";
+    const aria = el.getAttribute("aria-label") || el.getAttribute("title") || "";
+    const placeholder = el.getAttribute("placeholder") || "";
+    return {
+      tag: el.tagName.toLowerCase(),
+      type: el.getAttribute("type") || "",
+      text: textOf(el),
+      label,
+      aria,
+      placeholder,
+      name: el.getAttribute("name") || "",
+      role: el.getAttribute("role") || "",
+      disabled: Boolean(el.disabled),
+    };
+  });
+  const links = Array.from(document.querySelectorAll("a[href]")).slice(0, 30).map((el) => ({
+    text: textOf(el),
+    href: el.href,
+  }));
+  const bodyText = textOf(document.body).slice(0, 8000);
+  const perf = performance.getEntriesByType("navigation")[0];
+  const failedResources = performance.getEntriesByType("resource")
+    .filter((r) => {
+      const name = String(r.name || "");
+      if (!name || name.startsWith("data:")) return false;
+      try {
+        if (new URL(name, location.href).origin !== location.origin) return false;
+      } catch {
+        return false;
+      }
+      return r.transferSize === 0 && r.decodedBodySize === 0;
+    })
+    .slice(0, 20)
+    .map((r) => r.name);
+  return {
+    url: location.href,
+    title: document.title,
+    headings: pick("h1,h2,h3", 30),
+    buttons: pick("button,[role=button],input[type=submit]", 30),
+    inputs: controls,
+    links,
+    bodyText,
+    viewport: { width: innerWidth, height: innerHeight },
+    timingMs: perf ? Math.round(perf.duration) : null,
+    failedResources,
+    hasHorizontalOverflow: document.documentElement.scrollWidth > innerWidth + 2,
+    focusableCount: document.querySelectorAll("a[href],button,input,textarea,select,[tabindex]").length,
+  };
+})()"""
+
+
+def _build_customer_findings(
+    probe: dict,
+    target: ExperienceTarget,
+    profile: CustomerProfile,
+    plan: CustomerTestPlan,
+) -> tuple[list[str], list[CustomerFinding]]:
+    text = str(probe.get("bodyText", ""))
+    lowered = text.lower()
+    headings = [str(item) for item in probe.get("headings", [])]
+    inputs = [item for item in probe.get("inputs", []) if isinstance(item, dict)]
+    buttons = [str(item) for item in probe.get("buttons", [])]
+    failed_resources = [str(item) for item in probe.get("failedResources", [])]
+    markers: list[str] = []
+    findings: list[CustomerFinding] = []
+
+    if headings or text:
+        markers.append(
+            "STEP_PASS|first-impression|"
+            f"title={probe.get('title', '')!s}; headings={'; '.join(headings[:5]) or 'none'}"
+        )
+    else:
+        markers.append("STEP_FAIL|first-impression|expected readable page content -> found empty DOM")
+        findings.append(_browser_finding(
+            "first-impression-empty",
+            "Page has no readable first-impression content",
+            CustomerSeverity.critical,
+            "The customer lands on the page but cannot understand what this product is for.",
+            "Activation fails before the customer can try the promised workflow.",
+            "Every first visit.",
+            "Render a clear product promise, primary job, and first action above the fold.",
+            trust=True,
+            core=True,
+        ))
+
+    has_actionable_control = any(_control_is_actionable(control) for control in inputs) or bool(buttons)
+    if has_actionable_control:
+        markers.append("STEP_PASS|core-workflow-cues|page exposes form/button controls for a customer action")
+    else:
+        markers.append("STEP_FAIL|core-workflow-cues|expected form/button controls -> none detected")
+        findings.append(_browser_finding(
+            "missing-core-workflow",
+            "No obvious customer action is available",
+            CustomerSeverity.high,
+            "The page reads like information rather than a tool the customer can use.",
+            "The customer cannot complete the main job without guessing where to start.",
+            "Every user attempting the core workflow.",
+            "Expose a clear primary input/action path for the core customer workflow.",
+            core=True,
+        ))
+
+    unnamed_controls = [
+        control for control in inputs
+        if control.get("tag") in {"input", "textarea", "select", "button"}
+        and not any(str(control.get(key, "")).strip() for key in ("text", "label", "aria", "placeholder", "name"))
+        and control.get("type") not in {"hidden"}
+    ]
+    if unnamed_controls:
+        markers.append(
+            "STEP_FAIL|accessibility-basics|"
+            f"{len(unnamed_controls)} control(s) lack visible/aria/name labels"
+        )
+        findings.append(_browser_finding(
+            "unlabeled-controls",
+            "Interactive controls lack accessible names",
+            CustomerSeverity.medium,
+            "A non-technical customer using keyboard or assistive tooling may not know what a control does.",
+            "Accessibility and usability regress for operational users reviewing the product quickly.",
+            "Any session involving keyboard or assistive technology.",
+            "Add visible labels or aria-label/title/name attributes to every interactive control.",
+        ))
+    else:
+        markers.append("STEP_PASS|accessibility-basics|interactive controls have basic names or labels")
+
+    trust_terms = ("privacy", "secure", "security", "data", "local", "client", "upload", "not stored", "delete")
+    if any(term in lowered for term in trust_terms):
+        markers.append("STEP_PASS|trust-copy|page includes at least one data/privacy/trust cue")
+    else:
+        markers.append("STEP_FAIL|trust-copy|expected privacy/data/trust cues -> none detected")
+        findings.append(_browser_finding(
+            "missing-trust-copy",
+            "No visible trust or data-handling explanation",
+            CustomerSeverity.medium,
+            f"{profile.persona} must decide whether it is safe to use real work data.",
+            "The product may be functionally usable but blocked from adoption with real customer data.",
+            "Every buyer or operator before first real upload.",
+            "Add concise privacy/data-handling copy near the primary workflow and report output.",
+            trust=True,
+        ))
+
+    output_terms = ("report", "result", "download", "export", "summary", "next action", "recommend")
+    if any(term in lowered for term in output_terms):
+        markers.append("STEP_PASS|output-actionability|page contains output/report/actionability language")
+    else:
+        markers.append("STEP_FAIL|output-actionability|expected report/result/next-action language -> none detected")
+        findings.append(_browser_finding(
+            "unclear-output-value",
+            "Output value is not clear before use",
+            CustomerSeverity.low,
+            "The customer may not know what useful artifact they will receive after completing the workflow.",
+            "Lower confidence and conversion before the first run.",
+            "Every evaluation session.",
+            "Preview the kind of report, result, or next action the customer will receive.",
+        ))
+
+    if probe.get("hasHorizontalOverflow"):
+        markers.append("STEP_FAIL|layout-overflow|document is wider than viewport")
+        findings.append(_browser_finding(
+            "horizontal-overflow",
+            "Page has horizontal overflow",
+            CustomerSeverity.medium,
+            "The customer may need to pan sideways or miss content on the current viewport.",
+            "Mobile and narrow-screen review becomes less trustworthy.",
+            "Any small-screen or split-screen session.",
+            "Fix responsive layout so the document width stays within the viewport.",
+        ))
+    else:
+        markers.append("STEP_PASS|layout-overflow|no horizontal overflow detected")
+
+    if failed_resources:
+        markers.append(f"STEP_FAIL|resource-health|{len(failed_resources)} zero-size resource(s) detected")
+        findings.append(_browser_finding(
+            "resource-health",
+            "Some page resources appear failed or empty",
+            CustomerSeverity.low,
+            "The customer may see missing styles, images, scripts, or credibility cues.",
+            "Trust and polish are weaker if visible resources fail.",
+            "Depends on cache/network path.",
+            "Inspect failed resources and remove broken references or serve them correctly.",
+        ))
+    else:
+        markers.append("STEP_PASS|resource-health|no obvious failed resources detected via performance entries")
+
+    for task in plan.tasks:
+        markers.append(f"STEP_PASS|planned-task|{task.id}: {task.title}")
+    markers.append(f"STEP_PASS|customer-context|persona={profile.persona}; target={target.url}")
+    return markers, findings
+
+
+def _control_is_actionable(control: dict) -> bool:
+    if control.get("disabled"):
+        return False
+    tag = str(control.get("tag", ""))
+    input_type = str(control.get("type", "")).lower()
+    if tag in {"button", "textarea", "select"}:
+        return True
+    return tag == "input" and input_type not in {"hidden", "checkbox", "radio"}
+
+
+def _browser_finding(
+    finding_id: str,
+    title: str,
+    severity: CustomerSeverity,
+    customer_interpretation: str,
+    business_impact: str,
+    likely_frequency: str,
+    recommendation: str,
+    *,
+    trust: bool = False,
+    core: bool = False,
+) -> CustomerFinding:
+    return CustomerFinding(
+        id=finding_id,
+        title=title,
+        severity=severity,
+        customer_interpretation=customer_interpretation,
+        business_impact=business_impact,
+        likely_frequency=likely_frequency,
+        recommendation=recommendation,
+        confidence=0.7,
+        trust_blocker=trust,
+        core_task_blocker=core,
+    )
+
+
+def _summarize_probe(probe: dict, markers: list[str]) -> str:
+    headings = "; ".join(str(item) for item in probe.get("headings", [])[:3])
+    failed = len([marker for marker in markers if marker.startswith("STEP_FAIL|")])
+    passed = len([marker for marker in markers if marker.startswith("STEP_PASS|")])
+    return (
+        f"Rich customer browser probe completed for {probe.get('url', '')}. "
+        f"Title: {probe.get('title', '')}. Headings: {headings or 'none'}. "
+        f"Markers: {passed} pass, {failed} fail."
+    )
 
 
 def _finding_from_manual_text(text: str, evidence: CustomerEvidence) -> CustomerFinding | None:

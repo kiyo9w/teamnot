@@ -340,7 +340,8 @@ SEVERITY_CHOICES = ["critical", "high", "medium"]
 @click.option("--out", "out_dir", type=click.Path(file_okay=False, path_type=Path),
               required=True, help="Output artifact directory.")
 @click.option("--runner", type=click.Choice(RUNNER_CHOICES), default=CustomerLoopRunnerName.manual.value,
-              show_default=True)
+              show_default=True,
+              help="manual ingests an existing report; openclaw-windows-cdp runs a rich browser/customer probe.")
 @click.option("--evidence", "evidence_path", type=click.Path(exists=False, dir_okay=False, path_type=Path),
               default=None, help="Existing evidence file for manual mode.")
 def customer_test(
@@ -387,7 +388,8 @@ def customer_test(
               default=CustomerSeverity.high.value, show_default=True)
 @click.option("--run-teamnot/--no-run-teamnot", default=False, show_default=True)
 @click.option("--runner", type=click.Choice(RUNNER_CHOICES), default=CustomerLoopRunnerName.manual.value,
-              show_default=True)
+              show_default=True,
+              help="manual ingests an existing report; openclaw-windows-cdp runs a rich browser/customer probe.")
 @click.option("--evidence", "evidence_path", type=click.Path(exists=False, dir_okay=False, path_type=Path),
               default=None, help="Existing evidence file for manual mode.")
 @click.option("--previous-brief", "previous_brief_path",

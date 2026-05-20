@@ -17,6 +17,7 @@ from teamnot.customer_loop import (
 from teamnot.customer_loop.artifacts import render_customer_report
 from teamnot.customer_loop.models import CustomerLoopConfig
 from teamnot.customer_loop.orchestrator import default_customer_test_plan
+from teamnot.customer_loop.runners import _path_for_windows_wrapper, _resolve_wrapper_path
 
 
 def _profile() -> CustomerProfile:
@@ -50,6 +51,39 @@ def test_openclaw_runner_degrades_when_wrapper_missing(tmp_path: Path):
         runner.run(target, profile, plan, tmp_path / "out")
 
 
+def test_openclaw_runner_resolves_workspace_wrapper(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    wrapper = workspace / "scripts" / "winbrowser"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv("OPENCLAW_WORKSPACE", str(workspace))
+    assert _resolve_wrapper_path("scripts/winbrowser") == wrapper
+
+
+def test_openclaw_runner_resolves_ancestor_workspace_wrapper(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    project = workspace / "teamnot"
+    wrapper = workspace / "scripts" / "winbrowser"
+    wrapper.parent.mkdir(parents=True)
+    project.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.delenv("OPENCLAW_WORKSPACE", raising=False)
+    monkeypatch.chdir(project)
+    assert _resolve_wrapper_path("scripts/winbrowser") == wrapper
+
+
+def test_openclaw_runner_converts_absolute_paths_for_windows_wrapper(monkeypatch, tmp_path: Path):
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="C:\\\\wsl\\\\artifact.png\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert _path_for_windows_wrapper(tmp_path / "artifact.png") == "C:\\\\wsl\\\\artifact.png"
+    assert calls[0][:2] == ["wslpath", "-w"]
+
+
 def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):
     wrapper = tmp_path / "scripts" / "winbrowser"
     wrapper.parent.mkdir()
@@ -58,7 +92,37 @@ def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):
 
     def command_runner(command):
         commands.append(list(command))
-        return subprocess.CompletedProcess(command, 0, stdout="Mock Title", stderr="")
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"ok": true, "url": "https://example-product.test", "title": "Mock Product"}',
+                stderr="",
+            )
+        if action == "eval":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"ok": true, "result": {'
+                    '"url": "https://example-product.test",'
+                    '"title": "Mock Product",'
+                    '"headings": ["Mock Product"],'
+                    '"buttons": ["Run test"],'
+                    '"inputs": [{"tag": "input", "type": "file", "text": "", "label": "CSV file"}],'
+                    '"links": [],'
+                    '"bodyText": "Upload your CSV to generate a report. Privacy: data is local.",'
+                    '"viewport": {"width": 1280, "height": 720},'
+                    '"timingMs": 123,'
+                    '"failedResources": [],'
+                    '"hasHorizontalOverflow": false,'
+                    '"focusableCount": 2'
+                    "}}"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
 
     target, profile, plan = _plan(tmp_path)
     report = OpenClawWindowsCDPRunner(wrapper_path=wrapper, command_runner=command_runner).run(
@@ -70,6 +134,53 @@ def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):
         ["--action", "screenshot"],
     ]
     assert report.evidence[0].kind == "browser_observation"
+    assert "first-impression" in report.evidence[0].raw_excerpt
+    assert report.findings == []
+
+
+def test_openclaw_runner_reports_customer_findings_from_real_browser_probe(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def command_runner(command):
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "title": ""}', stderr="")
+        if action == "eval":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"ok": true, "result": {'
+                    '"url": "https://example-product.test",'
+                    '"title": "",'
+                    '"headings": [],'
+                    '"buttons": [],'
+                    '"inputs": [{"tag": "button", "text": "", "label": "", "aria": "", "placeholder": "", "name": "", "disabled": true}],'
+                    '"links": [],'
+                    '"bodyText": "",'
+                    '"viewport": {"width": 390, "height": 844},'
+                    '"timingMs": 500,'
+                    '"failedResources": ["https://example-product.test/missing.css"],'
+                    '"hasHorizontalOverflow": true,'
+                    '"focusableCount": 1'
+                    "}}"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    target, profile, plan = _plan(tmp_path)
+    report = OpenClawWindowsCDPRunner(wrapper_path=wrapper, command_runner=command_runner).run(
+        target, profile, plan, tmp_path / "out"
+    )
+    finding_ids = {finding.id for finding in report.findings}
+    assert "first-impression-empty" in finding_ids
+    assert "missing-core-workflow" in finding_ids
+    assert "unlabeled-controls" in finding_ids
+    assert "STEP_FAIL|first-impression" in report.evidence[0].raw_excerpt
+    assert len(report.evidence[0].screenshot_paths) == 2
 
 
 def test_openclaw_runner_wraps_timeout_as_customer_loop_error(tmp_path: Path):

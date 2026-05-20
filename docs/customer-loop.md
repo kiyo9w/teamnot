@@ -91,9 +91,21 @@ evidence and customer reports do not land in TeamNoT's own source tree.
 Core TeamNoT imports do not depend on OpenClaw, Windows, Chrome, Playwright, or
 CDP. The `ExperienceRunner` protocol isolates evidence collection. The baseline
 `ManualEvidenceRunner` consumes an existing report file and normalizes it into
-customer-loop artifacts. The optional `OpenClawWindowsCDPRunner` shells out to
-`scripts/winbrowser` when present and reports a readable error when absent.
-Tests mock command execution and do not require a real browser.
+customer-loop artifacts.
+
+The optional `OpenClawWindowsCDPRunner` shells out to `scripts/winbrowser` when
+present and reports a readable error when absent. It is not a title-only smoke
+check: it navigates in a real Windows Chrome/CDP session, captures first
+impression and full-page screenshots, probes the DOM, and emits
+`STEP_PASS`/`STEP_FAIL` markers across first impression, core workflow cues,
+output/actionability, trust copy, accessibility basics, layout overflow, and
+resource health. Tests mock command execution and do not require a real browser.
+
+Full task-specific flows such as uploading a file, completing checkout, or
+testing an authenticated workspace still belong in the richer customer-testing
+rubric or a future custom runner. Customer Loop's built-in OpenClaw runner is
+the productized browser evidence baseline, while manual mode remains the
+fallback for ingesting richer human/agent reports.
 
 ## Generated Brief Shape
 

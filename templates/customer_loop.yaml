@@ -16,4 +16,9 @@ tasks:
       - The customer can complete the workflow without developer knowledge.
       - The output is clear, trustworthy, and actionable.
       - Any failure states explain what happened and what to do next.
-notes: Keep findings customer-centered: interpretation, business impact, likely frequency, recommendation, severity, and confidence.
+notes: >
+  Keep findings customer-centered: interpretation, business impact, likely
+  frequency, recommendation, severity, confidence, trust blocker, and core task
+  blocker. For built-in browser evidence, run with --runner
+  openclaw-windows-cdp to collect screenshots, DOM/workflow cues, trust-copy
+  checks, accessibility basics, layout overflow, and resource-health markers.
