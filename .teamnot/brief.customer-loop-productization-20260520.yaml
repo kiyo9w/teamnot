@@ -1,0 +1,429 @@
+schema_version: "2.0"
+
+project:
+  name: teamnot-customer-loop-productization
+  path: /home/ngoka/.openclaw/workspace/teamnot
+  language: [python, markdown, yaml]
+  stack: [click, pydantic, pytest, ruff, teamnot, browser-automation-adapters]
+  conventions_file: .teamnot/conventions.md
+  memory_file: .teamnot/memory.md
+
+task:
+  id: CUSTOMER-LOOP-PRODUCTIZATION-20260520
+  title: Productize customer testing and overseer-driven next-brief loops as a TeamNoT feature
+  description: |
+    Build a first-class TeamNoT feature that productizes the workflow we just
+    proved manually:
+
+      customer/end-user testing -> customer-centered report -> overseer chooses
+      best next move -> generated TeamNoT brief -> TeamNoT run -> repeat.
+
+    This is not merely adding another agent role. It is a higher-level product
+    loop around TeamNoT's existing brief-driven engineering engine.
+
+    Real context from the successful manual workflow:
+
+    - Target product: Shopify CSV Preflight.
+    - TeamNoT built and iterated the product from detailed YAML briefs.
+    - A separate customer-testing skill drove Windows Chrome over CDP/OpenClaw
+      wrappers and evaluated the deployed Cloudflare app like a real Shopify
+      agency operations lead, not like a developer.
+    - The customer tester reported:
+      - observed browser behavior,
+      - screenshots/evidence,
+      - customer interpretation,
+      - business/product impact,
+      - likely frequency,
+      - recommended fix,
+      - severity by customer impact,
+      - scores across job importance, value, time-to-value, task success,
+        usability, trust/readiness, output actionability, domain fit, buying
+        readiness, retention likelihood, emotional confidence, and technical
+        reliability.
+    - The overseer then selected the next best move and wrote a new TeamNoT
+      brief. TeamNoT executed that brief and passed DoD.
+    - The loop fixed multiple issues that pure coding DoD would not naturally
+      catch:
+      - product looked too local/developer-only,
+      - media URLs that were merely not checked were incorrectly called hard
+        failures,
+      - wrong `.md` files were accepted as CSV and produced confident reports,
+      - report preview was blank although download worked.
+
+    Product vision:
+
+    TeamNoT should gain a "Customer Loop" capability:
+
+    - Given a target URL/app and a realistic customer profile, it can run or
+      ingest a customer test.
+    - It writes structured artifacts under `.teamnot/customer-loop/`.
+    - It generates a customer-centered report and scores.
+    - It selects the next best engineering/product move.
+    - It writes a follow-up TeamNoT brief.
+    - Optionally, it can invoke `teamnot run` on that generated brief.
+    - It can repeat this for N iterations until no Critical/High customer
+      blockers remain, budget/iteration cap is hit, or the overseer marks the
+      product as customer-ready enough for the current target.
+
+    Required architecture:
+
+    1. Core schema package
+       - Add a small customer loop module under `src/teamnot/customer_loop/`.
+       - Define Pydantic models for:
+         - `CustomerProfile`
+         - `CustomerJob`
+         - `ExperienceTarget`
+         - `CustomerTestPlan`
+         - `CustomerTestTask`
+         - `CustomerEvidence`
+         - `CustomerFinding`
+         - `CustomerScores`
+         - `CustomerReport`
+         - `GeneratedBrief`
+         - `CustomerLoopConfig`
+         - `CustomerLoopResult`
+       - Include stable enums or literals for severity:
+         `critical`, `high`, `medium`, `low`, `positive`.
+       - Include stable fields for:
+         - persona/role/seniority/domain literacy,
+         - current workflow,
+         - buying trigger,
+         - alternatives,
+         - buyer/user split,
+         - trust threshold,
+         - functional/emotional/social job,
+         - device/browser context,
+         - evidence path,
+         - screenshot paths,
+         - customer interpretation,
+         - business impact,
+         - likely frequency,
+         - recommendation,
+         - confidence.
+
+    2. Runner abstraction
+       - Define an `ExperienceRunner` interface/protocol.
+       - Core TeamNoT must not import OpenClaw or hard-require Windows.
+       - Provide at least:
+         - `ManualEvidenceRunner`: consumes an existing report/evidence file and
+           converts it into a `CustomerReport` shape or stores it as raw evidence.
+         - `OpenClawWindowsCDPRunner`: optional adapter that shells out to the
+           known OpenClaw wrappers when present:
+             - `scripts/winbrowser --action status`
+             - `scripts/winbrowser --action navigate --url ...`
+             - `scripts/winbrowser --action screenshot --out ...`
+             - `scripts/winbrowser --action eval --expr ...`
+           It must degrade cleanly with a readable error if wrappers are absent.
+       - Keep the adapter deterministic-testable: unit tests should mock command
+         execution and must not require a real browser.
+
+    3. Overseer/orchestrator
+       - Add a `CustomerLoopOrchestrator` or equivalent.
+       - It receives:
+         - target app/URL,
+         - customer profile,
+         - report/evidence,
+         - max iterations,
+         - severity threshold,
+         - optional path to a previous TeamNoT brief.
+       - It chooses the next best move by customer impact:
+         - Critical first,
+         - then High,
+         - prefer fixes that remove trust blockers or core task blockers,
+         - avoid broad polish before customer-critical blockers are gone.
+       - It writes a follow-up TeamNoT brief YAML with:
+         - detailed task context,
+         - references to report/evidence,
+         - precise required behavior,
+         - machine-verifiable DoD,
+         - non-goals,
+         - safety constraints.
+       - It must be deterministic enough for tests. If LLM-based synthesis is
+         added later, it should be behind an optional worker and not required for
+         baseline tests.
+
+    4. CLI
+       - Add commands:
+         - `teamnot customer-test`
+         - `teamnot customer-loop`
+       - The exact Click structure is up to the implementer, but the commands
+         must be visible in `teamnot --help`.
+       - `customer-test` should support at minimum:
+         - `--target URL`
+         - `--profile FILE`
+         - `--out DIR`
+         - `--runner manual|openclaw-windows-cdp`
+         - `--evidence FILE` for manual mode.
+       - `customer-loop` should support at minimum:
+         - `--target URL`
+         - `--profile FILE`
+         - `--out DIR`
+         - `--max-iterations N`
+         - `--severity-threshold critical|high|medium`
+         - `--run-teamnot/--no-run-teamnot`
+         - `--runner manual|openclaw-windows-cdp`
+         - `--evidence FILE`
+       - Default should be safe:
+         - generate report and follow-up brief,
+         - do not recursively invoke TeamNoT unless user opts in with
+           `--run-teamnot`.
+
+    5. Artifact layout
+       - Use project-local artifacts:
+         `.teamnot/customer-loop/<task-or-timestamp>/`
+       - Store:
+         - `customer_profile.yaml`
+         - `customer_test_plan.yaml`
+         - `customer_report.md`
+         - `customer_report.json`
+         - `generated_brief.yaml`
+         - `screenshots/` or evidence path references
+         - `loop_summary.md`
+       - Do not put browser evidence in TeamNoT's source tree by default when
+         evaluating another project.
+
+    6. Templates and docs
+       - Add template YAML files under `templates/` for:
+         - `customer_profile.yaml`
+         - `customer_loop.yaml` or `customer_test_plan.yaml`
+       - Add documentation, preferably `docs/customer-loop.md`, explaining:
+         - the mental model,
+         - the manual Shopify CSV Preflight example,
+         - how Customer Loop differs from ordinary QA,
+         - how it relates to TeamNoT's existing brief/DoD engine,
+         - portability and adapter design,
+         - example commands,
+         - example generated brief structure.
+       - Update README with a concise feature section and link to the docs.
+
+    7. Tests
+       - Add deterministic tests for schemas and serialization.
+       - Add tests for selecting the next best move from a report.
+       - Add tests for generating a valid TeamNoT brief from customer findings.
+       - Add CLI tests for `customer-test --help` and `customer-loop --help`.
+       - Add tests proving OpenClaw Windows CDP adapter degrades cleanly when
+         wrappers are missing and can be mocked when present.
+       - Add tests proving manual evidence mode can create customer-loop
+         artifacts without a browser.
+       - Existing tests must continue to pass.
+
+    8. Commit discipline
+       - Work on the current feature branch, not `main`.
+       - Commit regularly after coherent milestones:
+         1. schema/models,
+         2. orchestrator/brief generation,
+         3. CLI,
+         4. docs/templates,
+         5. tests/cleanup.
+       - Each commit should pass at least the relevant targeted tests when
+         feasible.
+       - Never force-push.
+
+    Design constraints:
+
+    - Do not make core TeamNoT depend on OpenClaw.
+    - Do not require a real browser for tests.
+    - Do not introduce metered model/API dependencies.
+    - Do not auto-deploy.
+    - Do not push remote.
+    - Do not remove or rewrite the existing brief-driven TeamNoT engine.
+    - Preserve existing TeamNoT commands and tests.
+    - Keep implementation practical; if a fully autonomous browser evaluator is
+      too large for one iteration, ship the schema, CLI, manual evidence mode,
+      adapter interface, and generated brief loop first, with clear docs and
+      extension points.
+
+    Definition of success:
+
+    A user can run something like:
+
+      teamnot customer-loop \
+        --target https://example-product.test \
+        --profile .teamnot/customer-loop/shopify-agency-ops.yaml \
+        --evidence .teamnot/customer-testing/report.md \
+        --runner manual \
+        --out .teamnot/customer-loop/run-001 \
+        --no-run-teamnot
+
+    and receive a structured customer-loop folder containing:
+
+      - normalized customer report JSON,
+      - markdown loop summary,
+      - generated follow-up TeamNoT brief YAML,
+      - enough context for `teamnot run --brief generated_brief.yaml`.
+  constraints:
+    no_deploy: true
+    no_main_commit: true
+    no_secrets_in_code: true
+    no_force_push: true
+    no_destructive_git: true
+    extra:
+      - Work on branch feature/customer-loop-20260520 or another feature branch, never main.
+      - Commit regularly after coherent milestones.
+      - Do not revert existing uncommitted TeamNoT Codex-worker integration changes; work with them.
+      - Keep OpenClaw/Windows CDP support behind optional adapters.
+      - Tests must be deterministic and must not require live browser/CDP.
+      - Do not add secrets, tokens, or machine-specific absolute paths to templates.
+  references:
+    - README.md
+    - templates/brief.yaml
+    - src/teamnot/brief.py
+    - src/teamnot/cli/__main__.py
+    - src/teamnot/engine/pipeline.py
+    - src/teamnot/engine/worker.py
+    - src/teamnot/workspace.py
+    - src/teamnot/dod.py
+    - tests/
+    - .teamnot/conventions.md
+    - .teamnot/memory.md
+
+definition_of_done:
+  require_all_pass: true
+  llm_judge_required: false
+  checks:
+    - name: pytest suite passes
+      run: .venv/bin/pytest -q
+      expect_exit: 0
+      timeout_s: 300
+    - name: ruff passes
+      run: .venv/bin/ruff check .
+      expect_exit: 0
+      timeout_s: 300
+    - name: customer loop package exists
+      file_exists: src/teamnot/customer_loop/__init__.py
+    - name: customer loop schema models exist
+      file_contains:
+        src/teamnot/customer_loop/models.py: "CustomerReport"
+    - name: experience runner interface exists
+      file_contains:
+        src/teamnot/customer_loop/runners.py: "ExperienceRunner"
+    - name: openclaw adapter exists but is optional
+      file_contains:
+        src/teamnot/customer_loop/runners.py: "OpenClawWindowsCDPRunner"
+    - name: overseer exists
+      file_contains:
+        src/teamnot/customer_loop/orchestrator.py: "CustomerLoopOrchestrator"
+    - name: generated brief model exists
+      file_contains:
+        src/teamnot/customer_loop/models.py: "GeneratedBrief"
+    - name: customer-test command visible
+      run: .venv/bin/teamnot --help | grep -q "customer-test"
+      expect_exit: 0
+      timeout_s: 60
+    - name: customer-loop command visible
+      run: .venv/bin/teamnot --help | grep -q "customer-loop"
+      expect_exit: 0
+      timeout_s: 60
+    - name: customer-loop help documents safe no-run mode
+      run: .venv/bin/teamnot customer-loop --help | grep -q "no-run-teamnot"
+      expect_exit: 0
+      timeout_s: 60
+    - name: customer profile template exists
+      file_exists: templates/customer_profile.yaml
+    - name: customer loop template exists
+      file_exists: templates/customer_loop.yaml
+    - name: customer loop docs exist
+      file_contains:
+        docs/customer-loop.md: "Customer Loop"
+    - name: README mentions customer loop
+      file_contains:
+        README.md: "Customer Loop"
+    - name: tests cover customer loop
+      run: |
+        test -f tests/test_customer_loop.py
+        grep -q "CustomerLoopOrchestrator" tests/test_customer_loop.py
+        grep -q "OpenClawWindowsCDPRunner" tests/test_customer_loop.py
+      expect_exit: 0
+      timeout_s: 60
+    - name: manual evidence mode creates artifacts and generated brief
+      run: |
+        tmpdir="$(mktemp -d)"
+        cat > "$tmpdir/profile.yaml" <<'YAML'
+        role: Shopify agency operations lead
+        seniority: senior operator
+        domain_literacy: Knows Shopify Admin imports, Matrixify, CSVs, variants, SKUs, image URLs, and rollback risk.
+        current_workflow: Export products, inspect CSV, run import, verify catalog, recover manually if needed.
+        buying_trigger: Large catalog update or migration where import mistakes are expensive.
+        trust_threshold: Must not produce confident reports from wrong input; must explain evidence honestly.
+        alternatives:
+          - Shopify Admin import
+          - Matrixify
+          - manual spreadsheet QA
+        functional_job: Catch import blockers before production.
+        emotional_job: Feel safe enough to approve a risky import.
+        social_job: Share a credible report with client or team.
+        YAML
+        cat > "$tmpdir/evidence.md" <<'MD'
+        # Customer Testing Report
+        ## Findings
+        ### Critical - Wrong file types can produce successful reports
+        Customer impact: The operator may forward a misleading report.
+        Business impact: Blocks trust in production usage.
+        Recommended fix: Reject non-CSV uploads before analysis.
+        Confidence: High.
+        MD
+        .venv/bin/teamnot customer-loop \
+          --target https://example.test \
+          --profile "$tmpdir/profile.yaml" \
+          --evidence "$tmpdir/evidence.md" \
+          --runner manual \
+          --out "$tmpdir/out" \
+          --no-run-teamnot
+        test -f "$tmpdir/out/customer_report.md"
+        test -f "$tmpdir/out/customer_report.json"
+        test -f "$tmpdir/out/generated_brief.yaml"
+        test -f "$tmpdir/out/loop_summary.md"
+        .venv/bin/teamnot validate --brief "$tmpdir/out/generated_brief.yaml" --json | grep -q '"ok": true'
+      expect_exit: 0
+      timeout_s: 180
+
+deliverable:
+  type: feature_branch
+  branch: feature/customer-loop-20260520
+  base: main
+  push_remote: false
+  report_to: file
+  report_path: .teamnot/reports/CUSTOMER-LOOP-PRODUCTIZATION-20260520__handover.md
+  webhook_url: null
+  telegram_chat_id: null
+
+budget:
+  max_minutes: 480
+  max_usd: 0.0
+  max_retries: 10
+  max_dod_attempts: 20
+  cost_guard_enabled: true
+  cost_warn_pct: 0.7
+  cost_pause_pct: 0.9
+  cost_hard_stop_pct: 1.0
+  require_explicit_api_optin: true
+  allowed_metered_workers: []
+
+notes: |
+  This is a long autonomous self-improvement run. Do not stop at a shallow
+  placeholder. The minimum acceptable result is a real, documented, tested
+  Customer Loop feature with schemas, CLI commands, manual evidence mode, an
+  optional OpenClaw Windows CDP adapter abstraction, generated TeamNoT briefs,
+  and artifact layout.
+
+  The customer-loop feature should preserve TeamNoT's core value:
+  written contract -> autonomous implementation -> machine-verifiable DoD.
+  It adds the missing upstream product loop:
+  realistic customer evidence -> overseer decision -> next written contract.
+
+metadata:
+  requested_by: Trung
+  created_by: Pikachu
+  date: "2026-05-20"
+  source_workflow:
+    - customer-testing-openclaw skill
+    - Windows Chrome CDP via OpenClaw wrappers
+    - overseer best-next-move decision
+    - generated TeamNoT YAML briefs
+    - Shopify CSV Preflight evaluation and iteration
+  desired_feature_names:
+    - Customer Loop
+    - Validation Loops
+    - ExperienceRunner
+    - CustomerLoopOrchestrator
+    - GeneratedBrief

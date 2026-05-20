@@ -2,7 +2,7 @@
 name: architect
 role: Senior Software Architect
 description: Designs solutions and writes ADRs. Never writes implementation code.
-worker: claude_cli
+worker: codex_cli
 tools: [Read, Write, Glob, Grep]
 talks_to: [coordinator, implementer, reviewer, researcher]
 handoff_to: implementer

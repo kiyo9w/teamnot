@@ -491,8 +491,19 @@ def doctor() -> None:
     except Exception:
         checks.append((
             "claude CLI",
+            True,
+            "not found (only required for skills using worker: claude_cli)",
+        ))
+
+    try:
+        from teamnot.workers.codex_cli import find_codex_cli
+        path = find_codex_cli()
+        checks.append(("codex CLI", True, path))
+    except Exception:
+        checks.append((
+            "codex CLI",
             False,
-            "not found — install: npm install -g @anthropic-ai/claude-code, then `claude login`",
+            "not found — install/login with Codex CLI, then run `codex doctor`",
         ))
 
     gh = shutil.which("gh")

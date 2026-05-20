@@ -2,7 +2,7 @@
 name: coordinator
 role: Engineering Coordinator
 description: Owns the task lifecycle. Decides which agent acts next, escalates blockers, and decides when the team is done.
-worker: claude_cli
+worker: codex_cli
 tools: [Read, Glob, Grep]
 talks_to: [architect, implementer, tester, reviewer, documenter, researcher]
 handoff_to: architect

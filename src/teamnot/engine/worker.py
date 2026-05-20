@@ -31,12 +31,13 @@ from teamnot.engine.pipeline import (
     PipelineConfig,
     PipelineOutcome,
     PipelineResult,
-    claude_cli_invoker,
+    routed_cli_invoker,
 )
 from teamnot.engine.planner import DualPlanResult, dual_plan
 from teamnot.memory.knowledge_review import KnowledgeReview, review_workspace
 from teamnot.safety import CostGuard
 from teamnot.workers.claude_cli import ClaudeCliWorker
+from teamnot.workers.codex_cli import CodexCliWorker
 from teamnot.workers.minimax import MinimaxWorker
 from teamnot.workspace import Workspace, WorkspaceLockError
 
@@ -151,13 +152,14 @@ class Worker:
         # 2. Build runtime services
         guard = CostGuard.from_brief(self.brief)
         claude = ClaudeCliWorker(self.brief, self.ws, guard)
+        codex = CodexCliWorker(self.brief, self.ws, guard)
         minimax = MinimaxWorker(guard)
 
         # 3. Dual plan
         plan_result: DualPlanResult | None = None
         if plan:
             try:
-                plan_result = dual_plan(self.brief, self.ws, guard, claude, minimax)
+                plan_result = dual_plan(self.brief, self.ws, guard, claude, minimax, codex)
                 self.ws.save_checkpoint(
                     self.brief.task.id,
                     phase="01-plan",
@@ -204,7 +206,7 @@ class Worker:
                     registry=registry,
                     bus=bus,
                     dod_evaluator=dod_eval,
-                    invoker=claude_cli_invoker(claude),
+                    invoker=routed_cli_invoker(claude=claude, codex=codex),
                     config=PipelineConfig(
                         max_iterations=self.brief.budget.max_dod_attempts,
                         max_consecutive_failures=self.brief.budget.max_retries,

@@ -2,14 +2,14 @@
 name: reviewer
 role: Tech Lead Code Reviewer
 description: Reviews the diff. Outputs APPROVE or REJECT with a written rationale.
-worker: claude_cli
+worker: codex_cli
 tools: [Read, Bash, Glob, Grep]
 talks_to: [coordinator, implementer, tester]
 handoff_to: documenter
 inputs: [diff, adr, conventions, test_report]
 outputs: [review_verdict, qa_report]
 timeout_s: 300
-metered_ok: true
+metered_ok: false
 ---
 
 # Reviewer agent

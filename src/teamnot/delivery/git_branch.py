@@ -83,24 +83,20 @@ def create_feature_branch(
     if not state.is_repo:
         return {"ok": False, "error": "not a git repository", "state": state.notes}
 
-    # Make sure base exists locally (best effort — don't network)
-    base_check = _run_git(["rev-parse", "--verify", base], project_path)
-    if base_check.returncode != 0:
-        return {
-            "ok": False,
-            "error": f"base branch '{base}' not found locally",
-            "hint": "create or fetch it before running TeamNoT",
-        }
-
-    # Switch / create
-    switch = _run_git(["switch", "-c", branch, base], project_path)
-    if switch.returncode != 0 and "already exists" in (switch.stderr or ""):
-        # Branch exists — just switch into it
-        switch = _run_git(["switch", branch], project_path)
-    if switch.returncode != 0:
-        return {"ok": False, "error": switch.stderr.strip() or "git switch failed"}
-
     notes: list[str] = []
+    if state.current_branch == branch:
+        notes.append(f"already on branch {branch}")
+    else:
+        base_check = _run_git(["rev-parse", "--verify", base], project_path)
+        start_point = base if base_check.returncode == 0 else "HEAD"
+        if start_point == "HEAD":
+            notes.append(f"base branch '{base}' not found locally; creating {branch} from current HEAD")
+
+        switch = _run_git(["switch", "-c", branch, start_point], project_path)
+        if switch.returncode != 0 and "already exists" in (switch.stderr or ""):
+            switch = _run_git(["switch", branch], project_path)
+        if switch.returncode != 0:
+            return {"ok": False, "error": switch.stderr.strip() or "git switch failed"}
 
     if stage_all:
         add = _run_git(["add", "-A"], project_path)
@@ -137,8 +133,12 @@ def diff_summary(project_path: Path, base: str = "main") -> dict:
     if not state.is_repo:
         return {"ok": False, "files": [], "stats": {}, "note": "not a git repo"}
 
-    stat = _run_git(["diff", "--stat", f"{base}...HEAD"], project_path).stdout
-    files = _run_git(["diff", "--name-only", f"{base}...HEAD"], project_path).stdout
+    if _run_git(["rev-parse", "--verify", base], project_path).returncode == 0:
+        stat = _run_git(["diff", "--stat", f"{base}...HEAD"], project_path).stdout
+        files = _run_git(["diff", "--name-only", f"{base}...HEAD"], project_path).stdout
+    else:
+        stat = _run_git(["show", "--stat", "--format=", "HEAD"], project_path).stdout
+        files = _run_git(["show", "--name-only", "--format=", "HEAD"], project_path).stdout
     return {
         "ok": True,
         "files": [f for f in files.splitlines() if f.strip()],

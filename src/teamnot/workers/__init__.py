@@ -9,6 +9,7 @@ The registry lets the engine pick a worker by name at runtime instead of
 hard-coding which model does what.
 """
 from teamnot.workers.claude_cli import ClaudeCliWorker
+from teamnot.workers.codex_cli import CodexCliWorker
 from teamnot.workers.minimax import MinimaxWorker
 
-__all__ = ["ClaudeCliWorker", "MinimaxWorker"]
+__all__ = ["ClaudeCliWorker", "CodexCliWorker", "MinimaxWorker"]

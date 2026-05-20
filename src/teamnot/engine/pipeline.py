@@ -31,6 +31,7 @@ from teamnot.brief import Brief
 from teamnot.dod import DoDEvaluator, DoDResult
 from teamnot.safety import CostGuard
 from teamnot.workers.claude_cli import ClaudeCliResult, ClaudeCliWorker
+from teamnot.workers.codex_cli import CodexCliWorker
 from teamnot.workspace import Workspace
 
 logger = logging.getLogger("teamnot.engine.pipeline")
@@ -391,4 +392,44 @@ def claude_cli_invoker(claude: ClaudeCliWorker) -> WorkerInvoker:
             allowed_tools=spec.tools or None,
             note=f"agent:{spec.name}",
         )
+    return _invoke
+
+
+def routed_cli_invoker(
+    *,
+    claude: ClaudeCliWorker | None = None,
+    codex: CodexCliWorker | None = None,
+) -> WorkerInvoker:
+    """Return a WorkerInvoker that dispatches by each skill's `worker` field."""
+
+    def _invoke(spec: AgentSpec, user_prompt: str) -> ClaudeCliResult:
+        full_prompt = (
+            "=== SYSTEM PROMPT (from SKILL.md) ===\n"
+            + spec.system_prompt
+            + "\n\n=== USER PROMPT ===\n"
+            + user_prompt
+        )
+        if spec.worker == "codex_cli":
+            if codex is None:
+                raise RuntimeError("codex_cli worker requested, but CodexCliWorker is not configured")
+            return codex.run(
+                prompt=full_prompt,
+                timeout=spec.timeout_s,
+                allowed_tools=spec.tools or None,
+                note=f"agent:{spec.name}",
+            )
+        if spec.worker == "claude_cli":
+            if claude is None:
+                raise RuntimeError("claude_cli worker requested, but ClaudeCliWorker is not configured")
+            return claude.run(
+                prompt=full_prompt,
+                timeout=spec.timeout_s,
+                allowed_tools=spec.tools or None,
+                note=f"agent:{spec.name}",
+            )
+        raise RuntimeError(
+            f"worker '{spec.worker}' is not supported by the CLI pipeline yet "
+            "(supported: claude_cli, codex_cli)"
+        )
+
     return _invoke

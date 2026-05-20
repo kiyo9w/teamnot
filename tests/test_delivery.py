@@ -82,6 +82,24 @@ def test_create_feature_branch_commits_when_changes_present(git_repo: Path):
 
 
 @skip_if_no_git
+def test_create_feature_branch_falls_back_to_head_when_base_missing(git_repo: Path):
+    subprocess.run(["git", "branch", "-m", "main", "work"], cwd=git_repo, check=True)
+    (git_repo / "new.py").write_text("x = 1\n", encoding="utf-8")
+
+    result = create_feature_branch(
+        git_repo,
+        branch="feature/no-main",
+        base="main",
+        commit_message="add new.py",
+    )
+
+    assert result["ok"], result
+    assert result["committed"]
+    assert any("base branch 'main' not found locally" in note for note in result["notes"])
+    assert detect_repo(git_repo).current_branch == "feature/no-main"
+
+
+@skip_if_no_git
 def test_create_feature_branch_refuses_main(git_repo: Path):
     result = create_feature_branch(git_repo, branch="main", base="main")
     assert not result["ok"]
