@@ -21,6 +21,16 @@ interpretation, business impact, likely frequency, recommended fix, severity,
 and scores for value, usability, trust, task success, domain fit, buying
 readiness, retention, confidence, and reliability.
 
+For manual evidence, label blocker fields explicitly when possible:
+
+```markdown
+Trust blocker: yes
+Core task blocker: no
+```
+
+Those labels override loose keyword heuristics and make the overseer's priority
+ranking more reliable.
+
 That loop found issues ordinary machine DoD did not naturally catch:
 
 - the product looked too local and developer-only,

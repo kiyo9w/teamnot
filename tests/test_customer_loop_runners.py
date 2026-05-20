@@ -71,6 +71,38 @@ def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):
     assert report.evidence[0].kind == "browser_observation"
 
 
+def test_openclaw_runner_wraps_timeout_as_customer_loop_error(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def command_runner(command):
+        raise subprocess.TimeoutExpired(command, timeout=30)
+
+    target, profile, plan = _plan(tmp_path)
+    runner = OpenClawWindowsCDPRunner(wrapper_path=wrapper, command_runner=command_runner)
+    with pytest.raises(CustomerLoopRunnerError, match="timed out|manual"):
+        runner.run(target, profile, plan, tmp_path / "out")
+
+
+def test_manual_evidence_labeled_blocker_fields_override_loose_heuristics(tmp_path: Path):
+    evidence = tmp_path / "report.md"
+    evidence.write_text(
+        "\n".join([
+            "Title: Trust copy is clear",
+            "Severity: high",
+            "Customer interpretation: I trust this result.",
+            "Trust blocker: no",
+            "Core task blocker: yes",
+        ]),
+        encoding="utf-8",
+    )
+    target, profile, plan = _plan(tmp_path)
+    report = ManualEvidenceRunner(evidence).run(target, profile, plan, tmp_path / "out")
+    assert report.findings[0].trust_blocker is False
+    assert report.findings[0].core_task_blocker is True
+
+
 def test_runner_enum_values_are_stable():
     assert CustomerLoopRunnerName.manual.value == "manual"
     assert CustomerLoopRunnerName.openclaw_windows_cdp.value == "openclaw-windows-cdp"

@@ -95,8 +95,14 @@ def test_create_feature_branch_falls_back_to_head_when_base_missing(git_repo: Pa
 
     assert result["ok"], result
     assert result["committed"]
+    assert result["base_missing"] is True
+    assert result["start_point"] == "HEAD"
     assert any("base branch 'main' not found locally" in note for note in result["notes"])
     assert detect_repo(git_repo).current_branch == "feature/no-main"
+
+    diff = diff_summary(git_repo, base="main")
+    assert diff["base_missing"] is True
+    assert "limited to HEAD commit" in diff["note"]
 
 
 @skip_if_no_git

@@ -84,12 +84,15 @@ def create_feature_branch(
         return {"ok": False, "error": "not a git repository", "state": state.notes}
 
     notes: list[str] = []
+    base_missing = False
+    start_point = base
     if state.current_branch == branch:
         notes.append(f"already on branch {branch}")
     else:
         base_check = _run_git(["rev-parse", "--verify", base], project_path)
         start_point = base if base_check.returncode == 0 else "HEAD"
         if start_point == "HEAD":
+            base_missing = True
             notes.append(f"base branch '{base}' not found locally; creating {branch} from current HEAD")
 
         switch = _run_git(["switch", "-c", branch, start_point], project_path)
@@ -121,6 +124,8 @@ def create_feature_branch(
         "ok": True,
         "branch": branch,
         "base": base,
+        "base_missing": base_missing,
+        "start_point": start_point,
         "committed": committed,
         "head": head,
         "notes": notes,
@@ -133,14 +138,20 @@ def diff_summary(project_path: Path, base: str = "main") -> dict:
     if not state.is_repo:
         return {"ok": False, "files": [], "stats": {}, "note": "not a git repo"}
 
-    if _run_git(["rev-parse", "--verify", base], project_path).returncode == 0:
+    base_missing = _run_git(["rev-parse", "--verify", base], project_path).returncode != 0
+    note = ""
+    if not base_missing:
         stat = _run_git(["diff", "--stat", f"{base}...HEAD"], project_path).stdout
         files = _run_git(["diff", "--name-only", f"{base}...HEAD"], project_path).stdout
     else:
+        note = f"base branch '{base}' not found locally; diff is limited to HEAD commit"
         stat = _run_git(["show", "--stat", "--format=", "HEAD"], project_path).stdout
         files = _run_git(["show", "--name-only", "--format=", "HEAD"], project_path).stdout
     return {
         "ok": True,
+        "base": base,
+        "base_missing": base_missing,
+        "note": note,
         "files": [f for f in files.splitlines() if f.strip()],
         "stats_raw": stat.strip(),
     }

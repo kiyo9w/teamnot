@@ -107,7 +107,13 @@ class OpenClawWindowsCDPRunner:
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         command = [str(self.wrapper_path), *args]
-        result = self.command_runner(command)
+        try:
+            result = self.command_runner(command)
+        except subprocess.TimeoutExpired as exc:
+            raise CustomerLoopRunnerError(
+                f"OpenClaw wrapper timed out: {' '.join(command)}. "
+                "Use --runner manual --evidence FILE or retry after checking the Windows CDP bridge."
+            ) from exc
         if result.returncode != 0:
             raise CustomerLoopRunnerError(
                 f"OpenClaw wrapper failed: {' '.join(command)}\n{result.stderr.strip()}"
@@ -148,6 +154,12 @@ def _finding_from_manual_text(text: str, evidence: CustomerEvidence) -> Customer
         _extract_labeled(text, "customer interpretation")
         or _extract_labeled(text, "customer impact")
     )
+    trust_blocker = _extract_labeled_bool(text, "trust blocker", default="trust" in text.lower())
+    core_task_blocker = _extract_labeled_bool(
+        text,
+        "core task blocker",
+        default=any(token in text.lower() for token in ("blocked", "cannot", "can't", "fails")),
+    )
     return CustomerFinding(
         id="manual-001",
         title=title[:160],
@@ -158,8 +170,8 @@ def _finding_from_manual_text(text: str, evidence: CustomerEvidence) -> Customer
         likely_frequency=_extract_labeled(text, "likely frequency"),
         recommendation=recommendation,
         confidence=0.75,
-        trust_blocker="trust" in text.lower(),
-        core_task_blocker=any(token in text.lower() for token in ("blocked", "cannot", "can't", "fails")),
+        trust_blocker=trust_blocker,
+        core_task_blocker=core_task_blocker,
     )
 
 
@@ -167,3 +179,10 @@ def _extract_labeled(text: str, label: str) -> str:
     pattern = rf"^\s*(?:[-*]\s*)?{re.escape(label)}\s*[:|-]\s*(.+?)\s*$"
     match = re.search(pattern, text, re.I | re.M)
     return match.group(1).strip() if match else ""
+
+
+def _extract_labeled_bool(text: str, label: str, *, default: bool = False) -> bool:
+    raw = _extract_labeled(text, label)
+    if not raw:
+        return default
+    return raw.lower().split()[0].strip(".,;") in {"yes", "true", "1", "y"}

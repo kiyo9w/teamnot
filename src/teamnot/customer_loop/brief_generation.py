@@ -1,6 +1,7 @@
 """Deterministic follow-up TeamNoT brief generation."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,8 @@ def generate_followup_brief(
 ) -> GeneratedBrief:
     project_path = previous_brief.project.path if previous_brief else Path.cwd()
     project_name = previous_brief.project.name if previous_brief else project_path.name
-    task_id = f"CUSTOMER-LOOP-{finding.id.upper().replace('_', '-')}"
+    finding_suffix = re.sub(r"[^A-Za-z0-9-]+", "-", finding.id).strip("-").upper() or "FINDING"
+    task_id = f"CUSTOMER-LOOP-{finding_suffix}"
     description = f"""Customer Loop selected this as the next highest-impact move.
 
 Target: {report.target.url}

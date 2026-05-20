@@ -125,3 +125,23 @@ def test_generated_report_preserves_evidence_reference():
         evidence=[CustomerEvidence(path=".teamnot/customer-testing/report.md")],
     )
     assert ".teamnot/customer-testing/report.md" in finding.evidence[0].path
+
+
+def test_generated_brief_sanitizes_finding_id_for_git_branch(tmp_path: Path):
+    evidence = tmp_path / "evidence.md"
+    evidence.write_text("Title: Bad branch chars\nSeverity: critical\n", encoding="utf-8")
+    config = CustomerLoopConfig(
+        target=ExperienceTarget(url="https://example-product.test"),
+        profile=_profile(),
+        out_dir=tmp_path / "out",
+        evidence_path=evidence,
+    )
+    result = CustomerLoopOrchestrator().run(config)
+    assert result.generated_brief is not None
+
+    result.report.findings[0].id = "bad/id .. lock"
+    from teamnot.customer_loop.brief_generation import generate_followup_brief
+
+    generated = generate_followup_brief(result.report, result.report.findings[0], tmp_path / "out")
+    assert generated.task_id == "CUSTOMER-LOOP-BAD-ID-LOCK"
+    assert generated.yaml["deliverable"]["branch"] == "feature/customer-loop-bad-id-lock"

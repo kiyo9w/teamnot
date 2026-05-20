@@ -16,4 +16,4 @@ tasks:
       - The customer can complete the workflow without developer knowledge.
       - The output is clear, trustworthy, and actionable.
       - Any failure states explain what happened and what to do next.
-notes: Keep findings customer-centered: interpretation, business impact, likely frequency, recommendation, severity, and confidence.
+notes: Keep findings customer-centered: interpretation, business impact, likely frequency, recommendation, severity, confidence, Trust blocker, and Core task blocker.
