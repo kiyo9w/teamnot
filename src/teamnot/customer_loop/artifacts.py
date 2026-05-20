@@ -37,13 +37,21 @@ def render_customer_report(report: CustomerReport) -> str:
             "",
             f"### {finding.severity.value.upper()}: {finding.title}",
             "",
-            f"- Customer interpretation: {finding.customer_interpretation or 'Not specified.'}",
-            f"- Business impact: {finding.business_impact or 'Not specified.'}",
-            f"- Likely frequency: {finding.likely_frequency or 'Not specified.'}",
-            f"- Recommendation: {finding.recommendation or 'Not specified.'}",
+            _render_field("Customer interpretation", finding.customer_interpretation),
+            _render_field("Business impact", finding.business_impact),
+            _render_field("Likely frequency", finding.likely_frequency),
+            _render_field("Recommendation", finding.recommendation),
             f"- Confidence: {finding.confidence:.2f}",
         ])
     return "\n".join(lines).strip() + "\n"
+
+
+def _render_field(label: str, value: str) -> str:
+    value = value.strip() if value else "Not specified."
+    if "\n" not in value:
+        return f"- {label}: {value}"
+    indented = "\n".join(f"  {line}" if line else "" for line in value.splitlines())
+    return f"- {label}:\n{indented}"
 
 
 def render_loop_summary(result: CustomerLoopResult) -> str:

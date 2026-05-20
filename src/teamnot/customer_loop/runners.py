@@ -166,7 +166,10 @@ def _finding_from_manual_text(text: str, evidence: CustomerEvidence) -> Customer
         severity=severity,
         evidence=[evidence],
         customer_interpretation=customer_interpretation,
-        business_impact=_extract_labeled(text, "business impact"),
+        business_impact=(
+            _extract_labeled(text, "business impact")
+            or _extract_labeled(text, "business/product impact")
+        ),
         likely_frequency=_extract_labeled(text, "likely frequency"),
         recommendation=recommendation,
         confidence=0.75,
@@ -176,9 +179,36 @@ def _finding_from_manual_text(text: str, evidence: CustomerEvidence) -> Customer
 
 
 def _extract_labeled(text: str, label: str) -> str:
-    pattern = rf"^\s*(?:[-*]\s*)?{re.escape(label)}\s*[:|-]\s*(.+?)\s*$"
+    pattern = rf"^[ \t]*(?:[-*][ \t]*)?{re.escape(label)}[ \t]*[:|-][ \t]*(.*?)[ \t]*$"
     match = re.search(pattern, text, re.I | re.M)
-    return match.group(1).strip() if match else ""
+    if not match:
+        return ""
+    inline = match.group(1).strip()
+    if inline:
+        return inline
+
+    lines = text[match.end():].splitlines()
+    block: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped and not block:
+            continue
+        if not stripped:
+            break
+        if re.match(r"^#{1,6}\s+", stripped):
+            break
+        if re.match(r"^[A-Za-z][A-Za-z /-]{1,60}\s*:\s*$", stripped):
+            break
+        block.append(stripped)
+    return _normalize_extracted_block(block)
+
+
+def _normalize_extracted_block(lines: list[str]) -> str:
+    if not lines:
+        return ""
+    if any(line.startswith(("-", "*")) for line in lines):
+        return "\n".join(lines)
+    return " ".join(lines)
 
 
 def _extract_labeled_bool(text: str, label: str, *, default: bool = False) -> bool:

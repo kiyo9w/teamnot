@@ -14,6 +14,7 @@ from teamnot.customer_loop import (
     ManualEvidenceRunner,
     OpenClawWindowsCDPRunner,
 )
+from teamnot.customer_loop.artifacts import render_customer_report
 from teamnot.customer_loop.models import CustomerLoopConfig
 from teamnot.customer_loop.orchestrator import default_customer_test_plan
 
@@ -101,6 +102,45 @@ def test_manual_evidence_labeled_blocker_fields_override_loose_heuristics(tmp_pa
     report = ManualEvidenceRunner(evidence).run(target, profile, plan, tmp_path / "out")
     assert report.findings[0].trust_blocker is False
     assert report.findings[0].core_task_blocker is True
+
+
+def test_manual_evidence_extracts_markdown_label_blocks(tmp_path: Path):
+    evidence = tmp_path / "report.md"
+    evidence.write_text(
+        "\n".join([
+            "### Critical - Wrong file types can produce successful reports",
+            "",
+            "Customer interpretation:",
+            "",
+            "The customer sees Completed and assumes the product understood their input.",
+            "This is dangerous because it creates a credible-looking report.",
+            "",
+            "Business/product impact:",
+            "",
+            "This blocks trust and production usage.",
+            "",
+            "Likely frequency:",
+            "",
+            "Medium. Dragging the wrong file is common in messy migration folders containing",
+            "exports, notes, reports, screenshots, and fixture files.",
+            "",
+            "Recommended fix:",
+            "",
+            "- Reject upload filenames that do not end in `.csv`.",
+            "- Add a customer-friendly retry error.",
+        ]),
+        encoding="utf-8",
+    )
+    target, profile, plan = _plan(tmp_path)
+    report = ManualEvidenceRunner(evidence).run(target, profile, plan, tmp_path / "out")
+    finding = report.findings[0]
+    assert finding.business_impact == "This blocks trust and production usage."
+    assert "fixture files" in finding.likely_frequency
+    assert "credible-looking report" in finding.customer_interpretation
+    assert "customer-friendly retry error" in finding.recommendation
+
+    rendered = render_customer_report(report)
+    assert "- Recommendation:\n  - Reject upload filenames" in rendered
 
 
 def test_runner_enum_values_are_stable():
