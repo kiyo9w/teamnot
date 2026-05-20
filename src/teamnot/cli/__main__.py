@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Force UTF-8 on Windows consoles so rich can emit arrows/box characters.
@@ -42,6 +44,21 @@ from teamnot.brief import (
     example_brief,
     load_brief,
     save_brief,
+)
+from teamnot.customer_loop import (
+    CustomerLoopConfig,
+    CustomerLoopError,
+    CustomerLoopOrchestrator,
+    CustomerLoopRunnerError,
+    CustomerLoopRunnerName,
+    CustomerProfile,
+    CustomerSeverity,
+    ExperienceTarget,
+    ManualEvidenceRunner,
+    OpenClawWindowsCDPRunner,
+    default_customer_test_plan,
+    load_model,
+    write_report_artifacts,
 )
 from teamnot.dod import DoDEvaluator
 from teamnot.engine import Worker
@@ -308,6 +325,118 @@ def _print_brief_summary(brief: Brief) -> None:
         f"[bold]Metered allow-list[/bold] {brief.budget.allowed_metered_workers or '[red]NONE[/red] (subscription/local only)'}"
     )
     console.print(Panel.fit(body, title="Brief OK", border_style="green"))
+
+
+# ── customer loop ────────────────────────────────────────────────────────────
+
+RUNNER_CHOICES = [runner.value for runner in CustomerLoopRunnerName]
+SEVERITY_CHOICES = ["critical", "high", "medium"]
+
+
+@main.command("customer-test", help="Run or ingest a customer test into customer-loop artifacts.")
+@click.option("--target", required=True, help="Target product URL.")
+@click.option("--profile", "profile_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              required=True, help="Customer profile YAML.")
+@click.option("--out", "out_dir", type=click.Path(file_okay=False, path_type=Path),
+              required=True, help="Output artifact directory.")
+@click.option("--runner", type=click.Choice(RUNNER_CHOICES), default=CustomerLoopRunnerName.manual.value,
+              show_default=True)
+@click.option("--evidence", "evidence_path", type=click.Path(exists=False, dir_okay=False, path_type=Path),
+              default=None, help="Existing evidence file for manual mode.")
+def customer_test(
+    target: str,
+    profile_path: Path,
+    out_dir: Path,
+    runner: str,
+    evidence_path: Path | None,
+) -> None:
+    try:
+        profile = load_model(profile_path, CustomerProfile)
+        target_model = ExperienceTarget(url=target)
+        config = CustomerLoopConfig(
+            target=target_model,
+            profile=profile,
+            out_dir=out_dir,
+            runner=CustomerLoopRunnerName(runner),
+            evidence_path=evidence_path,
+        )
+        plan = default_customer_test_plan(config)
+        if CustomerLoopRunnerName(runner) == CustomerLoopRunnerName.manual and evidence_path is None:
+            raise CustomerLoopRunnerError("--evidence is required for manual customer-test mode")
+        experience_runner = (
+            ManualEvidenceRunner(evidence_path)
+            if CustomerLoopRunnerName(runner) == CustomerLoopRunnerName.manual
+            else OpenClawWindowsCDPRunner()
+        )
+        report = experience_runner.run(target_model, profile, plan, out_dir)
+        write_report_artifacts(out_dir, profile, plan, report)
+    except CustomerLoopError as e:
+        console.print(f"[red]Customer test failed:[/red] {e}")
+        sys.exit(1)
+    console.print(f"[green]Customer test artifacts written:[/green] {out_dir}")
+
+
+@main.command("customer-loop", help="Generate a customer-centered report and next TeamNoT brief.")
+@click.option("--target", required=True, help="Target product URL.")
+@click.option("--profile", "profile_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              required=True, help="Customer profile YAML.")
+@click.option("--out", "out_dir", type=click.Path(file_okay=False, path_type=Path),
+              default=None, help="Output artifact directory.")
+@click.option("--max-iterations", type=int, default=1, show_default=True)
+@click.option("--severity-threshold", type=click.Choice(SEVERITY_CHOICES),
+              default=CustomerSeverity.high.value, show_default=True)
+@click.option("--run-teamnot/--no-run-teamnot", default=False, show_default=True)
+@click.option("--runner", type=click.Choice(RUNNER_CHOICES), default=CustomerLoopRunnerName.manual.value,
+              show_default=True)
+@click.option("--evidence", "evidence_path", type=click.Path(exists=False, dir_okay=False, path_type=Path),
+              default=None, help="Existing evidence file for manual mode.")
+@click.option("--previous-brief", "previous_brief_path",
+              type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
+              help="Optional previous TeamNoT brief for project metadata.")
+def customer_loop(
+    target: str,
+    profile_path: Path,
+    out_dir: Path | None,
+    max_iterations: int,
+    severity_threshold: str,
+    run_teamnot: bool,
+    runner: str,
+    evidence_path: Path | None,
+    previous_brief_path: Path | None,
+) -> None:
+    out = out_dir or Path(".teamnot") / "customer-loop" / datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    try:
+        profile = load_model(profile_path, CustomerProfile)
+        config = CustomerLoopConfig(
+            target=ExperienceTarget(url=target),
+            profile=profile,
+            out_dir=out,
+            max_iterations=max_iterations,
+            severity_threshold=CustomerSeverity(severity_threshold),
+            run_teamnot=run_teamnot,
+            runner=CustomerLoopRunnerName(runner),
+            evidence_path=evidence_path,
+            previous_brief_path=previous_brief_path,
+        )
+        orchestrator = CustomerLoopOrchestrator(
+            run_teamnot_hook=_invoke_teamnot_run if run_teamnot else None
+        )
+        result = orchestrator.run(config)
+    except CustomerLoopError as e:
+        console.print(f"[red]Customer loop failed:[/red] {e}")
+        sys.exit(1)
+    if result.generated_brief:
+        console.print(f"[green]Generated brief:[/green] {out / 'generated_brief.yaml'}")
+    else:
+        console.print("[yellow]No follow-up brief generated; no blocker met the threshold.[/yellow]")
+    console.print(f"[green]Customer loop artifacts written:[/green] {out}")
+
+
+def _invoke_teamnot_run(brief_path: Path) -> None:
+    subprocess.run(
+        [sys.executable, "-m", "teamnot.cli", "run", "--brief", str(brief_path)],
+        check=True,
+    )
 
 
 # ── doctor ───────────────────────────────────────────────────────────────────

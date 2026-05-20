@@ -61,6 +61,10 @@ won't do (overspend, push to `main`, deploy, leak secrets).
 
 ## Features
 
+- 🔁 **Customer Loop** — ingest or run a customer test, write structured
+  `.teamnot/customer-loop/` artifacts, choose the next best customer-impact
+  move, and generate a follow-up TeamNoT brief. See
+  [docs/customer-loop.md](docs/customer-loop.md).
 - 📜 **Project Brief Contract** — single `.teamnot/brief.yaml` carries the
   whole job: project, task, Definition of Done, deliverable, budget, allowed
   metered workers.
