@@ -117,6 +117,15 @@ result or download cues. It is still generic: task-specific flows such as
 uploading an arbitrary file, checkout, or authenticated setup should be modeled
 as future configured runners or ingested through manual evidence.
 
+`OpenClawWindowsFlowRunner` is the task-specific lane. Pass
+`--runner openclaw-windows-flow --flow path/to/customer_flow.yaml` to execute a
+configured customer workflow after the baseline probe. Supported flow actions
+include `upload`, `fill`, `click`, `wait_for_text`, `wait_for_selector`, and
+`wait_for_enabled`. Each step emits a stable `STEP_PASS` or `STEP_FAIL` marker
+and captures a screenshot, so flows such as upload CSV → run preflight → wait for
+blockers/report → download-enabled can be verified as real customer behavior
+rather than inferred from code.
+
 ## Generated Brief Shape
 
 The generated brief includes customer context, evidence references, the selected

@@ -33,6 +33,7 @@ class CustomerLoopRunnerName(str, Enum):
     manual = "manual"
     openclaw_windows_cdp = "openclaw-windows-cdp"
     openclaw_windows_interactive = "openclaw-windows-interactive"
+    openclaw_windows_flow = "openclaw-windows-flow"
 
 
 class CustomerProfile(BaseModel):
@@ -80,6 +81,22 @@ class CustomerTestPlan(BaseModel):
     customer_job: CustomerJob
     tasks: list[CustomerTestTask] = Field(default_factory=list)
     notes: str = ""
+
+
+class CustomerFlowStep(BaseModel):
+    id: str = Field(min_length=1)
+    action: str = Field(min_length=1)
+    selector: str = ""
+    text: str = ""
+    value: str = ""
+    file: Path | None = None
+    timeout_ms: int = Field(default=10000, ge=100, le=60000)
+    description: str = ""
+
+
+class CustomerFlow(BaseModel):
+    name: str = Field(min_length=1)
+    steps: list[CustomerFlowStep] = Field(default_factory=list)
 
 
 class CustomerEvidence(BaseModel):
@@ -150,6 +167,7 @@ class CustomerLoopConfig(BaseModel):
     runner: CustomerLoopRunnerName = CustomerLoopRunnerName.manual
     evidence_path: Path | None = None
     previous_brief_path: Path | None = None
+    flow_path: Path | None = None
 
 
 class CustomerLoopResult(BaseModel):

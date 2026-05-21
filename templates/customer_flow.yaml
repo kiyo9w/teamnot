@@ -1,0 +1,21 @@
+name: Upload CSV and verify report
+steps:
+  - id: upload-csv
+    action: upload
+    selector: "#csv-file"
+    file: /absolute/path/to/products.csv
+    description: Select the customer's CSV file.
+  - id: run-preflight
+    action: click
+    selector: "button[type=submit]"
+    description: Start the main customer workflow.
+  - id: see-results
+    action: wait_for_text
+    text: Blockers
+    timeout_ms: 15000
+    description: Confirm the product renders actionable findings.
+  - id: report-download-ready
+    action: wait_for_enabled
+    selector: "#download-report"
+    timeout_ms: 15000
+    description: Confirm the customer can export/share the report.

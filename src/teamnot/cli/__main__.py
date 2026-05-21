@@ -56,6 +56,7 @@ from teamnot.customer_loop import (
     ExperienceTarget,
     ManualEvidenceRunner,
     OpenClawWindowsCDPRunner,
+    OpenClawWindowsFlowRunner,
     OpenClawWindowsInteractiveRunner,
     default_customer_test_plan,
     load_model,
@@ -342,15 +343,18 @@ SEVERITY_CHOICES = ["critical", "high", "medium"]
               required=True, help="Output artifact directory.")
 @click.option("--runner", type=click.Choice(RUNNER_CHOICES), default=CustomerLoopRunnerName.manual.value,
               show_default=True,
-              help="manual ingests an existing report; openclaw-windows-cdp probes readiness; openclaw-windows-interactive also clicks a sample/demo flow.")
+              help="manual ingests an existing report; openclaw-windows-cdp probes readiness; openclaw-windows-interactive clicks a sample/demo flow; openclaw-windows-flow runs a configured customer flow.")
 @click.option("--evidence", "evidence_path", type=click.Path(exists=False, dir_okay=False, path_type=Path),
               default=None, help="Existing evidence file for manual mode.")
+@click.option("--flow", "flow_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Customer flow YAML for openclaw-windows-flow mode.")
 def customer_test(
     target: str,
     profile_path: Path,
     out_dir: Path,
     runner: str,
     evidence_path: Path | None,
+    flow_path: Path | None,
 ) -> None:
     try:
         profile = load_model(profile_path, CustomerProfile)
@@ -361,11 +365,12 @@ def customer_test(
             out_dir=out_dir,
             runner=CustomerLoopRunnerName(runner),
             evidence_path=evidence_path,
+            flow_path=flow_path,
         )
         plan = default_customer_test_plan(config)
         if CustomerLoopRunnerName(runner) == CustomerLoopRunnerName.manual and evidence_path is None:
             raise CustomerLoopRunnerError("--evidence is required for manual customer-test mode")
-        experience_runner = _customer_loop_runner(CustomerLoopRunnerName(runner), evidence_path)
+        experience_runner = _customer_loop_runner(CustomerLoopRunnerName(runner), evidence_path, flow_path)
         report = experience_runner.run(target_model, profile, plan, out_dir)
         write_report_artifacts(out_dir, profile, plan, report)
     except CustomerLoopError as e:
@@ -386,9 +391,11 @@ def customer_test(
 @click.option("--run-teamnot/--no-run-teamnot", default=False, show_default=True)
 @click.option("--runner", type=click.Choice(RUNNER_CHOICES), default=CustomerLoopRunnerName.manual.value,
               show_default=True,
-              help="manual ingests an existing report; openclaw-windows-cdp probes readiness; openclaw-windows-interactive also clicks a sample/demo flow.")
+              help="manual ingests an existing report; openclaw-windows-cdp probes readiness; openclaw-windows-interactive clicks a sample/demo flow; openclaw-windows-flow runs a configured customer flow.")
 @click.option("--evidence", "evidence_path", type=click.Path(exists=False, dir_okay=False, path_type=Path),
               default=None, help="Existing evidence file for manual mode.")
+@click.option("--flow", "flow_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Customer flow YAML for openclaw-windows-flow mode.")
 @click.option("--previous-brief", "previous_brief_path",
               type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
               help="Optional previous TeamNoT brief for project metadata.")
@@ -401,6 +408,7 @@ def customer_loop(
     run_teamnot: bool,
     runner: str,
     evidence_path: Path | None,
+    flow_path: Path | None,
     previous_brief_path: Path | None,
 ) -> None:
     out = out_dir or Path(".teamnot") / "customer-loop" / datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
@@ -415,6 +423,7 @@ def customer_loop(
             run_teamnot=run_teamnot,
             runner=CustomerLoopRunnerName(runner),
             evidence_path=evidence_path,
+            flow_path=flow_path,
             previous_brief_path=previous_brief_path,
         )
         orchestrator = CustomerLoopOrchestrator(
@@ -431,11 +440,17 @@ def customer_loop(
     console.print(f"[green]Customer loop artifacts written:[/green] {out}")
 
 
-def _customer_loop_runner(runner: CustomerLoopRunnerName, evidence_path: Path | None):
+def _customer_loop_runner(runner: CustomerLoopRunnerName, evidence_path: Path | None, flow_path: Path | None):
     if runner == CustomerLoopRunnerName.manual:
         if evidence_path is None:
             raise CustomerLoopRunnerError("--evidence is required for manual customer-loop mode")
         return ManualEvidenceRunner(evidence_path)
+    if runner == CustomerLoopRunnerName.openclaw_windows_flow:
+        if flow_path is None:
+            raise CustomerLoopRunnerError("--flow is required for openclaw-windows-flow mode")
+        from teamnot.customer_loop.models import CustomerFlow
+
+        return OpenClawWindowsFlowRunner(load_model(flow_path, CustomerFlow))
     if runner == CustomerLoopRunnerName.openclaw_windows_interactive:
         return OpenClawWindowsInteractiveRunner()
     return OpenClawWindowsCDPRunner()

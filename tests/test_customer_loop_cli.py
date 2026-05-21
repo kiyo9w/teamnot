@@ -17,9 +17,10 @@ def test_customer_loop_commands_are_visible_in_help():
 def test_customer_test_help_exposes_required_options():
     result = CliRunner().invoke(main, ["customer-test", "--help"])
     assert result.exit_code == 0
-    for option in ["--target", "--profile", "--out", "--runner", "--evidence"]:
+    for option in ["--target", "--profile", "--out", "--runner", "--evidence", "--flow"]:
         assert option in result.output
     assert "openclaw-windows-interactive" in result.output
+    assert "openclaw-windows-flow" in result.output
 
 
 def test_customer_loop_help_exposes_required_options():
@@ -35,9 +36,11 @@ def test_customer_loop_help_exposes_required_options():
         "--no-run-teamnot",
         "--runner",
         "--evidence",
+        "--flow",
     ]:
         assert option in result.output
     assert "openclaw-windows-interactive" in result.output
+    assert "openclaw-windows-flow" in result.output
 
 
 def test_customer_loop_manual_mode_writes_artifacts(tmp_path: Path):

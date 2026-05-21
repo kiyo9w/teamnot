@@ -184,7 +184,8 @@ def _render_missing_capabilities(report: CustomerReport) -> list[str]:
         for finding in report.findings:
             missing.append(f"- {finding.severity.value.upper()}: {finding.title}")
     raw = "\n".join(evidence.raw_excerpt for evidence in report.evidence)
-    if "STEP_SKIP|primary-workflow" in raw:
+    has_configured_flow = any(evidence.kind == "browser_flow" and "STEP_PASS|flow-" in evidence.raw_excerpt for evidence in report.evidence)
+    if "STEP_SKIP|primary-workflow" in raw and not has_configured_flow:
         missing.append("- Full primary workflow execution needs manual evidence or a task-specific interactive runner.")
     if "STEP_SKIP|jtbd-forces" in raw:
         missing.append("- JTBD forces and buyer/user mismatch still need human/agent interpretation.")

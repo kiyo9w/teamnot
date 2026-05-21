@@ -12,6 +12,8 @@ from teamnot.customer_loop.io import load_model, load_yaml, save_json, save_yaml
 from teamnot.customer_loop.models import (
     CustomerEvidence,
     CustomerFinding,
+    CustomerFlow,
+    CustomerFlowStep,
     CustomerJob,
     CustomerLoopConfig,
     CustomerLoopError,
@@ -37,12 +39,15 @@ from teamnot.customer_loop.runners import (
     ExperienceRunner,
     ManualEvidenceRunner,
     OpenClawWindowsCDPRunner,
+    OpenClawWindowsFlowRunner,
     OpenClawWindowsInteractiveRunner,
 )
 
 __all__ = [
     "CustomerEvidence",
     "CustomerFinding",
+    "CustomerFlow",
+    "CustomerFlowStep",
     "CustomerJob",
     "CustomerLoopConfig",
     "CustomerLoopError",
@@ -62,6 +67,7 @@ __all__ = [
     "GeneratedBrief",
     "ManualEvidenceRunner",
     "OpenClawWindowsCDPRunner",
+    "OpenClawWindowsFlowRunner",
     "OpenClawWindowsInteractiveRunner",
     "default_customer_test_plan",
     "ensure_artifact_dirs",

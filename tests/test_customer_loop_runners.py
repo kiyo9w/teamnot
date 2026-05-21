@@ -13,10 +13,11 @@ from teamnot.customer_loop import (
     ExperienceTarget,
     ManualEvidenceRunner,
     OpenClawWindowsCDPRunner,
+    OpenClawWindowsFlowRunner,
     OpenClawWindowsInteractiveRunner,
 )
 from teamnot.customer_loop.artifacts import render_customer_report
-from teamnot.customer_loop.models import CustomerLoopConfig
+from teamnot.customer_loop.models import CustomerFlow, CustomerFlowStep, CustomerLoopConfig
 from teamnot.customer_loop.orchestrator import default_customer_test_plan
 from teamnot.customer_loop.runners import _path_for_windows_wrapper, _resolve_wrapper_path
 
@@ -344,6 +345,102 @@ def test_openclaw_interactive_runner_clicks_sample_flow(tmp_path: Path):
     assert report.findings == []
 
 
+def test_openclaw_flow_runner_executes_configured_customer_steps(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    csv = tmp_path / "products.csv"
+    csv.write_text("Handle,Title\nexample,Example\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def command_runner(command):
+        commands.append(list(command))
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "title": "Mock"}', stderr="")
+        if action == "viewport":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+        if action == "upload":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "files": ["products.csv"]}', stderr="")
+        if action == "eval" and "--expr" in command and "step.action" in command[-1]:
+            if "wait_for_text" in command[-1]:
+                return subprocess.CompletedProcess(
+                    command, 0, stdout='{"ok": true, "result": {"passed": true, "summary": "found text: Blockers"}}', stderr=""
+                )
+            return subprocess.CompletedProcess(
+                command, 0, stdout='{"ok": true, "result": {"passed": true, "summary": "clicked Run preflight"}}', stderr=""
+            )
+        if action == "eval":
+            if any(
+                cmd[2] == "viewport" and "--width" in cmd and cmd[cmd.index("--width") + 1] == "390"
+                for cmd in commands if len(cmd) > 2
+            ):
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=(
+                        '{"ok": true, "result": {'
+                        '"url": "https://example-product.test",'
+                        '"viewport": {"width": 390, "height": 844},'
+                        '"hasHorizontalOverflow": false,'
+                        '"bodyTextLength": 300,'
+                        '"firstActions": ["Run preflight"]'
+                        "}}"
+                    ),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"ok": true, "result": {'
+                    '"url": "https://example-product.test",'
+                    '"title": "Mock Product",'
+                    '"headings": ["Mock Product"],'
+                    '"buttons": ["Run preflight"],'
+                    '"inputs": [{"tag": "input", "type": "file", "text": "", "label": "CSV file"}],'
+                    '"forms": [{"text": "Upload CSV file and run preflight", "controls": 2}],'
+                    '"links": [],'
+                    '"primaryActionText": ["Run preflight", "Download report"],'
+                    '"bodyText": "For agency operators with risky CSV workflow problems. Upload CSV, run preflight, fix invalid files, download report, share with team, privacy data local, pricing support demo.",'
+                    '"viewport": {"width": 1280, "height": 900},'
+                    '"timingMs": 123,'
+                    '"failedResources": [],'
+                    '"hasHorizontalOverflow": false,'
+                    '"focusableCount": 2,'
+                    '"imagesWithoutAlt": 0,'
+                    '"landmarkCount": 2,'
+                    '"semanticSignals": {'
+                    '"hasPricing": true, "hasSupport": true, "hasPrivacy": true,'
+                    '"hasSample": true, "hasErrorRecovery": true, "hasCollaboration": true'
+                    "}"
+                    "}}"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    flow = CustomerFlow(
+        name="Upload CSV and render report",
+        steps=[
+            CustomerFlowStep(id="upload-csv", action="upload", selector="#csv-file", file=csv),
+            CustomerFlowStep(id="run-preflight", action="click", selector="button[type=submit]"),
+            CustomerFlowStep(id="see-blockers", action="wait_for_text", text="Blockers"),
+        ],
+    )
+    target, profile, plan = _plan(tmp_path)
+    report = OpenClawWindowsFlowRunner(flow, wrapper_path=wrapper, command_runner=command_runner).run(
+        target, profile, plan, tmp_path / "out"
+    )
+
+    assert report.evidence[1].kind == "browser_flow"
+    assert "STEP_PASS|flow-upload-csv" in report.evidence[1].raw_excerpt
+    assert "STEP_PASS|flow-see-blockers" in report.evidence[1].raw_excerpt
+    assert len(report.evidence[1].screenshot_paths) == 3
+    assert any(cmd[1:3] == ["--action", "upload"] for cmd in commands)
+    assert report.findings == []
+
+
 def test_manual_evidence_labeled_blocker_fields_override_loose_heuristics(tmp_path: Path):
     evidence = tmp_path / "report.md"
     evidence.write_text(
@@ -410,3 +507,4 @@ def test_runner_enum_values_are_stable():
     assert CustomerLoopRunnerName.manual.value == "manual"
     assert CustomerLoopRunnerName.openclaw_windows_cdp.value == "openclaw-windows-cdp"
     assert CustomerLoopRunnerName.openclaw_windows_interactive.value == "openclaw-windows-interactive"
+    assert CustomerLoopRunnerName.openclaw_windows_flow.value == "openclaw-windows-flow"

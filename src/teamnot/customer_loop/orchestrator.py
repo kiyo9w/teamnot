@@ -12,10 +12,13 @@ from teamnot.customer_loop.artifacts import (
     write_report_artifacts,
 )
 from teamnot.customer_loop.brief_generation import generate_followup_brief
+from teamnot.customer_loop.io import load_model
 from teamnot.customer_loop.models import (
     CustomerFinding,
+    CustomerFlow,
     CustomerLoopConfig,
     CustomerLoopResult,
+    CustomerLoopRunnerError,
     CustomerLoopRunnerName,
     CustomerReport,
     CustomerSeverity,
@@ -23,6 +26,7 @@ from teamnot.customer_loop.models import (
 from teamnot.customer_loop.runners import (
     ManualEvidenceRunner,
     OpenClawWindowsCDPRunner,
+    OpenClawWindowsFlowRunner,
     OpenClawWindowsInteractiveRunner,
 )
 
@@ -100,10 +104,12 @@ class CustomerLoopOrchestrator:
     def _runner(self, config: CustomerLoopConfig):
         if config.runner == CustomerLoopRunnerName.manual:
             if config.evidence_path is None:
-                from teamnot.customer_loop.models import CustomerLoopRunnerError
-
                 raise CustomerLoopRunnerError("--evidence is required for manual customer-loop mode")
             return ManualEvidenceRunner(config.evidence_path)
+        if config.runner == CustomerLoopRunnerName.openclaw_windows_flow:
+            if config.flow_path is None:
+                raise CustomerLoopRunnerError("--flow is required for openclaw-windows-flow mode")
+            return OpenClawWindowsFlowRunner(load_model(config.flow_path, CustomerFlow))
         if config.runner == CustomerLoopRunnerName.openclaw_windows_interactive:
             return OpenClawWindowsInteractiveRunner()
         return OpenClawWindowsCDPRunner()
