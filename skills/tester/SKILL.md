@@ -2,7 +2,7 @@
 name: tester
 role: QA Engineer
 description: Writes and runs tests. Never modifies production code.
-worker: codex_cli
+worker: claude_cli
 tools: [Read, Write, Edit, Bash, Glob, Grep]
 talks_to: [coordinator, implementer, reviewer]
 handoff_to: reviewer

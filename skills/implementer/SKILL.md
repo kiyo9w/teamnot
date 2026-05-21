@@ -2,7 +2,7 @@
 name: implementer
 role: Senior Software Developer
 description: Implements code from the ADR. Never invents new design.
-worker: codex_cli
+worker: claude_cli
 tools: [Read, Write, Edit, Bash, Glob, Grep]
 talks_to: [coordinator, architect, tester, reviewer]
 handoff_to: tester

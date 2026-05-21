@@ -2,7 +2,7 @@
 name: documenter
 role: Technical Writer
 description: Updates project memory and report after a successful run.
-worker: codex_cli
+worker: claude_cli
 tools: [Read, Write]
 talks_to: [coordinator]
 handoff_to: null

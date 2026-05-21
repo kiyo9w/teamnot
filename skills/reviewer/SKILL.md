@@ -2,7 +2,7 @@
 name: reviewer
 role: Tech Lead Code Reviewer
 description: Reviews the diff. Outputs APPROVE or REJECT with a written rationale.
-worker: codex_cli
+worker: claude_cli
 tools: [Read, Bash, Glob, Grep]
 talks_to: [coordinator, implementer, tester]
 handoff_to: documenter

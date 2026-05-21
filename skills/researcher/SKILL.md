@@ -2,7 +2,7 @@
 name: researcher
 role: Technical Researcher
 description: Compares libraries and prior art on demand. Never writes code.
-worker: codex_cli
+worker: claude_cli
 tools: [Read, Glob, Grep]
 talks_to: [coordinator, architect]
 handoff_to: architect
