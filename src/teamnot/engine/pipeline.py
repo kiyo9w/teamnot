@@ -31,7 +31,7 @@ from teamnot.brief import Brief
 from teamnot.dod import DoDEvaluator, DoDResult
 from teamnot.safety import CostGuard
 from teamnot.workers.claude_cli import ClaudeCliResult, ClaudeCliWorker
-from teamnot.workers.codex_cli import CodexCliWorker
+from teamnot.workers.codex_cli import CodexCliResult, CodexCliWorker
 from teamnot.workspace import Workspace
 
 logger = logging.getLogger("teamnot.engine.pipeline")
@@ -159,7 +159,8 @@ class PipelineConfig:
     pause_between_iterations_s: float = 0.0
 
 
-WorkerInvoker = Callable[[AgentSpec, str], ClaudeCliResult]
+WorkerResult = ClaudeCliResult | CodexCliResult
+WorkerInvoker = Callable[[AgentSpec, str], WorkerResult]
 """Callable that turns (agent_spec, user_prompt) into a worker call result.
 
 The pipeline does not know which underlying worker each agent uses — it asks
@@ -402,7 +403,7 @@ def routed_cli_invoker(
 ) -> WorkerInvoker:
     """Return a WorkerInvoker that dispatches by each skill's `worker` field."""
 
-    def _invoke(spec: AgentSpec, user_prompt: str) -> ClaudeCliResult:
+    def _invoke(spec: AgentSpec, user_prompt: str) -> WorkerResult:
         full_prompt = (
             "=== SYSTEM PROMPT (from SKILL.md) ===\n"
             + spec.system_prompt
@@ -421,15 +422,53 @@ def routed_cli_invoker(
         if spec.worker == "claude_cli":
             if claude is None:
                 raise RuntimeError("claude_cli worker requested, but ClaudeCliWorker is not configured")
-            return claude.run(
+            result = claude.run(
                 prompt=full_prompt,
                 timeout=spec.timeout_s,
                 allowed_tools=spec.tools or None,
                 note=f"agent:{spec.name}",
             )
+            if _should_fallback_to_codex(result) and codex is not None:
+                logger.warning(
+                    "claude_cli failed for agent %s; falling back to codex_cli: rc=%s stderr=%s",
+                    spec.name,
+                    result.returncode,
+                    result.stderr[:200],
+                )
+                fallback = codex.run(
+                    prompt=full_prompt,
+                    timeout=spec.timeout_s,
+                    allowed_tools=spec.tools or None,
+                    note=f"agent:{spec.name}:fallback_from_claude",
+                )
+                if fallback.stderr:
+                    fallback.stderr = "fallback_from=claude_cli\n" + fallback.stderr
+                else:
+                    fallback.stderr = "fallback_from=claude_cli"
+                return fallback
+            return result
         raise RuntimeError(
             f"worker '{spec.worker}' is not supported by the CLI pipeline yet "
             "(supported: claude_cli, codex_cli)"
         )
 
     return _invoke
+
+
+def _should_fallback_to_codex(result: ClaudeCliResult) -> bool:
+    if result.returncode != 0:
+        return True
+    combined = f"{result.output}\n{result.stderr}".lower()
+    return any(
+        marker in combined
+        for marker in (
+            "timeout",
+            "rate limit",
+            "rate_limit",
+            "reach limit",
+            "usage limit",
+            "temporarily suspended",
+            "503",
+            "429",
+        )
+    )
