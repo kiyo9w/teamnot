@@ -154,16 +154,17 @@ def evaluate_domain_oracles(report: CustomerReport, oracles: list[DomainOutputOr
 def compare_iteration_coverage(
     iteration: int,
     report: CustomerReport,
-    previous: IterationCoverage | None = None,
+    previous: IterationCoverage | list[IterationCoverage] | None = None,
 ) -> IterationCoverage:
     routes = _routes(report)
     actions = _actions(report)
     screenshots = [shot for evidence in report.evidence for shot in evidence.screenshot_paths]
     findings = [finding.id for finding in report.findings]
-    previous_routes = set(previous.new_routes if previous else [])
-    previous_actions = set(previous.new_actions if previous else [])
-    previous_screenshots = set(previous.new_screenshots if previous else [])
-    previous_findings = set(previous.new_findings if previous else [])
+    previous_items = previous if isinstance(previous, list) else ([previous] if previous else [])
+    previous_routes = {route for item in previous_items for route in item.new_routes}
+    previous_actions = {action for item in previous_items for action in item.new_actions}
+    previous_screenshots = {shot for item in previous_items for shot in item.new_screenshots}
+    previous_findings = {finding for item in previous_items for finding in item.new_findings}
     new_routes = [route for route in routes if route not in previous_routes]
     new_actions = [action for action in actions if action not in previous_actions]
     new_screenshots = [shot for shot in screenshots if shot not in previous_screenshots]
@@ -176,7 +177,7 @@ def compare_iteration_coverage(
         new_actions=new_actions,
         new_screenshots=new_screenshots,
         new_findings=new_findings,
-        replayed=not new_evidence and previous is not None,
+        replayed=not new_evidence and bool(previous_items),
         new_evidence=new_evidence,
     )
 

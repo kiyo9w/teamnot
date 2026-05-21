@@ -78,7 +78,7 @@ class CustomerLoopOrchestrator:
             coverage = compare_iteration_coverage(
                 iteration,
                 report,
-                iteration_coverage[-1] if iteration_coverage else None,
+                iteration_coverage,
             )
             write_report_artifacts(iteration_dir, config.profile, plan, report)
             selected = select_next_best_move(report, config.severity_threshold)
