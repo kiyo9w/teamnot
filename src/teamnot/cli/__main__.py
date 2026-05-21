@@ -58,6 +58,8 @@ from teamnot.customer_loop import (
     OpenClawWindowsCDPRunner,
     OpenClawWindowsFlowRunner,
     OpenClawWindowsInteractiveRunner,
+    OpenClawWindowsResearcherRunner,
+    OpenClawWindowsSessionRunner,
     default_customer_test_plan,
     explore_product,
     inspect_customer_flow_pack,
@@ -339,7 +341,7 @@ def _print_brief_summary(brief: Brief) -> None:
 # ── customer loop ────────────────────────────────────────────────────────────
 
 RUNNER_CHOICES = [runner.value for runner in CustomerLoopRunnerName]
-SEVERITY_CHOICES = ["critical", "high", "medium"]
+SEVERITY_CHOICES = ["critical", "high", "medium", "low"]
 
 
 @main.command("customer-test", help="Run or ingest a customer test into customer-loop artifacts.")
@@ -350,7 +352,7 @@ SEVERITY_CHOICES = ["critical", "high", "medium"]
               required=True, help="Output artifact directory.")
 @click.option("--runner", type=click.Choice(RUNNER_CHOICES), default=CustomerLoopRunnerName.manual.value,
               show_default=True,
-              help="manual ingests an existing report; openclaw-windows-cdp probes readiness; openclaw-windows-interactive clicks a sample/demo flow; openclaw-windows-flow runs a configured customer flow.")
+              help="manual ingests an existing report; openclaw-windows-cdp probes readiness; openclaw-windows-interactive clicks a sample/demo flow; openclaw-windows-flow runs a configured customer flow; openclaw-windows-session explores, plans, and runs fresh flows each iteration.")
 @click.option("--evidence", "evidence_path", type=click.Path(exists=False, dir_okay=False, path_type=Path),
               default=None, help="Existing evidence file for manual mode.")
 @click.option("--flow", "flow_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -494,12 +496,15 @@ def customer_explore(
 @click.option("--wrapper", "wrapper_path", type=click.Path(dir_okay=False, path_type=Path),
               default=Path("scripts/winbrowser"), show_default=True,
               help="Browser wrapper command for OpenClaw Windows CDP.")
+@click.option("--file-fixture", "file_fixture_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Realistic local file for generated upload steps.")
 def customer_flow_session(
     target: str,
     profile_path: Path,
     routes: tuple[str, ...],
     out_dir: Path,
     wrapper_path: Path,
+    file_fixture_path: Path | None,
 ) -> None:
     try:
         profile = load_model(profile_path, CustomerProfile)
@@ -521,7 +526,7 @@ def customer_flow_session(
             planned_routes,
             wrapper_path=wrapper_path,
         )
-        runnable = make_flow_pack_runnable(inspected)
+        runnable = make_flow_pack_runnable(inspected, file_fixture_path=file_fixture_path)
         save_yaml(inspected, out_dir / "inspected_flow.yaml")
         save_yaml(runnable, out_dir / "runnable_flow.yaml")
         plan = default_customer_test_plan(CustomerLoopConfig(
@@ -557,11 +562,15 @@ def customer_flow_session(
 @click.option("--run-teamnot/--no-run-teamnot", default=False, show_default=True)
 @click.option("--runner", type=click.Choice(RUNNER_CHOICES), default=CustomerLoopRunnerName.manual.value,
               show_default=True,
-              help="manual ingests an existing report; openclaw-windows-cdp probes readiness; openclaw-windows-interactive clicks a sample/demo flow; openclaw-windows-flow runs a configured customer flow.")
+              help="manual ingests evidence; cdp probes readiness; interactive clicks a sample/demo flow; flow runs configured flows; session explores and runs flows; researcher adds branch planning/form/adversarial evidence.")
 @click.option("--evidence", "evidence_path", type=click.Path(exists=False, dir_okay=False, path_type=Path),
               default=None, help="Existing evidence file for manual mode.")
 @click.option("--flow", "flow_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
               default=None, help="Customer flow YAML for openclaw-windows-flow mode.")
+@click.option("--file-fixture", "file_fixture_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Realistic local file for generated upload steps in openclaw-windows-session mode.")
+@click.option("--seeded-state", "seeded_state_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Seeded account/state fixture for openclaw-windows-researcher authenticated journeys.")
 @click.option("--previous-brief", "previous_brief_path",
               type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
               help="Optional previous TeamNoT brief for project metadata.")
@@ -575,6 +584,8 @@ def customer_loop(
     runner: str,
     evidence_path: Path | None,
     flow_path: Path | None,
+    file_fixture_path: Path | None,
+    seeded_state_path: Path | None,
     previous_brief_path: Path | None,
 ) -> None:
     out = out_dir or Path(".teamnot") / "customer-loop" / datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
@@ -590,6 +601,8 @@ def customer_loop(
             runner=CustomerLoopRunnerName(runner),
             evidence_path=evidence_path,
             flow_path=flow_path,
+            file_fixture_path=file_fixture_path,
+            seeded_state_path=seeded_state_path,
             previous_brief_path=previous_brief_path,
         )
         orchestrator = CustomerLoopOrchestrator(
@@ -619,6 +632,10 @@ def _customer_loop_runner(runner: CustomerLoopRunnerName, evidence_path: Path | 
         return OpenClawWindowsFlowRunner(load_model(flow_path, CustomerFlowPack))
     if runner == CustomerLoopRunnerName.openclaw_windows_interactive:
         return OpenClawWindowsInteractiveRunner()
+    if runner == CustomerLoopRunnerName.openclaw_windows_session:
+        return OpenClawWindowsSessionRunner()
+    if runner == CustomerLoopRunnerName.openclaw_windows_researcher:
+        return OpenClawWindowsResearcherRunner()
     return OpenClawWindowsCDPRunner()
 
 

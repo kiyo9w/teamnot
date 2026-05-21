@@ -79,11 +79,26 @@ def explore_product(
         raise FileNotFoundError(f"Browser wrapper not found: {wrapper}")
     runner = command_runner or _default_runner
     base_route = _target_route(target)
-    _parse_json(_run(runner, [str(wrapper), "--action", "navigate", "--url", str(target.url)]))
-    discovered = _parse_json(_run(runner, [str(wrapper), "--action", "eval", "--expr", _ROUTE_DISCOVERY_JS]))
-    candidates = discovered.get("result", discovered)
-    if not isinstance(candidates, list):
-        candidates = []
+    candidates = _discover_route_candidates(wrapper, runner, target, base_route)
+    routes = _select_exploration_routes(
+        target,
+        profile,
+        [candidate for candidate in candidates if isinstance(candidate, dict)],
+        base_route,
+        max_routes,
+    )
+    visited = {route.route for route in routes}
+    for route in list(routes)[:4]:
+        for candidate in _discover_route_candidates(wrapper, runner, target, route.route):
+            candidate_route = _route_from_href(str(candidate.get("href", "")), target)
+            if not candidate_route or candidate_route in visited:
+                continue
+            visited.add(candidate_route)
+            candidates.append(candidate)
+            if len(visited) >= max_routes:
+                break
+        if len(visited) >= max_routes:
+            break
     routes = _select_exploration_routes(
         target,
         profile,
@@ -132,11 +147,7 @@ def discover_customer_routes(
         raise FileNotFoundError(f"Browser wrapper not found: {wrapper}")
     runner = command_runner or _default_runner
     base_route = _target_route(target)
-    _parse_json(_run(runner, [str(wrapper), "--action", "navigate", "--url", str(target.url)]))
-    discovered = _parse_json(_run(runner, [str(wrapper), "--action", "eval", "--expr", _ROUTE_DISCOVERY_JS]))
-    candidates = discovered.get("result", discovered)
-    if not isinstance(candidates, list):
-        candidates = []
+    candidates = _discover_route_candidates(wrapper, runner, target, base_route)
     ranked = sorted(
         [candidate for candidate in candidates if isinstance(candidate, dict)],
         key=lambda candidate: _route_candidate_rank(candidate, profile, target),
@@ -155,7 +166,25 @@ def discover_customer_routes(
     return routes
 
 
-def make_flow_pack_runnable(flow_pack: CustomerFlowPack) -> CustomerFlowPack:
+def _discover_route_candidates(
+    wrapper: Path,
+    runner: CommandRunner,
+    target: ExperienceTarget,
+    route: str,
+) -> list[dict]:
+    _parse_json(_run(runner, [str(wrapper), "--action", "navigate", "--url", urljoin(str(target.url), route)]))
+    discovered = _parse_json(_run(runner, [str(wrapper), "--action", "eval", "--expr", _ROUTE_DISCOVERY_JS]))
+    candidates = discovered.get("result", discovered)
+    if not isinstance(candidates, list):
+        return []
+    return [{**candidate, "sourceRoute": route} for candidate in candidates if isinstance(candidate, dict)]
+
+
+def make_flow_pack_runnable(
+    flow_pack: CustomerFlowPack,
+    file_fixture_path: str | Path | None = None,
+) -> CustomerFlowPack:
+    fixture = Path(file_fixture_path).expanduser() if file_fixture_path else None
     return CustomerFlowPack(
         name=f"{flow_pack.name} runnable",
         reset_between_flows=flow_pack.reset_between_flows,
@@ -163,7 +192,7 @@ def make_flow_pack_runnable(flow_pack: CustomerFlowPack) -> CustomerFlowPack:
             CustomerFlow(
                 name=flow.name,
                 start_url=flow.start_url,
-                steps=[_make_step_runnable(step) for step in flow.steps],
+                steps=[_make_step_runnable(step, fixture) for step in flow.steps],
             )
             for flow in flow_pack.flows
         ],
@@ -595,7 +624,16 @@ def _requires_human_approval(action: dict) -> bool:
     return bool(href and not href.startswith("#") and any(term in f"{text} {href}" for term in risky_terms))
 
 
-def _make_step_runnable(step: CustomerFlowStep) -> CustomerFlowStep:
+def _make_step_runnable(step: CustomerFlowStep, file_fixture_path: Path | None = None) -> CustomerFlowStep:
+    if step.action == "upload" and file_fixture_path is not None:
+        return CustomerFlowStep(
+            id=step.id,
+            action=step.action,
+            selector=step.selector,
+            file=file_fixture_path,
+            timeout_ms=step.timeout_ms,
+            description=step.description,
+        )
     text = " ".join([
         step.selector,
         step.text,
@@ -687,21 +725,33 @@ def _best_action(actions: list[dict]) -> dict | None:
     return ranked[0] if ranked else None
 
 
-def _action_rank(action: dict) -> tuple[int, int, int]:
+def _action_rank(action: dict) -> tuple[int, int, int, int]:
     text = str(action.get("text", "")).lower()
     tag = str(action.get("tag", "")).lower()
     selector = str(action.get("selector", "")).lower()
-    primary_terms = (
+    first_value_terms = (
         "run", "start", "create", "submit", "generate", "analyze", "analyse",
-        "import", "preflight", "upload", "continue", "save", "send", "invite",
-        "download", "explore", "contact", "try", "claim", "install",
+        "preflight", "upload", "continue", "try", "register", "sign up", "log in", "login",
+    )
+    secondary_terms = (
+        "import", "save", "send", "invite", "explore", "contact", "claim", "install",
+    )
+    output_terms = (
+        "download", "export",
     )
     nav_terms = (
         "skip to", "home", "menu", "research", "products", "business",
         "developers", "company", "foundation", "how it works", "pricing",
         "docs", "privacy", "terms", "learn",
     )
-    primary_score = 2 if any(term in text for term in primary_terms) else 0
+    if any(term in text for term in first_value_terms):
+        intent_score = 4
+    elif any(term in text for term in secondary_terms):
+        intent_score = 2
+    elif any(term in text for term in output_terms):
+        intent_score = 1
+    else:
+        intent_score = 0
     button_score = 1 if tag == "button" or "submit" in selector or "button" in selector else 0
     nav_penalty = -2 if any(term in text for term in nav_terms) else 0
     page_region_score = 3 if action.get("inMain") else 0
@@ -709,7 +759,8 @@ def _action_rank(action: dict) -> tuple[int, int, int]:
         page_region_score -= 4
     if action.get("inHeader") or action.get("inNav"):
         page_region_score -= 2
-    return primary_score + nav_penalty + page_region_score, button_score, len(text)
+    enabled_score = -2 if action.get("disabled") else 0
+    return intent_score + nav_penalty + page_region_score + enabled_score, button_score, -len(text), len(text)
 
 
 def _route_candidate_rank(candidate: dict, profile: CustomerProfile, target: ExperienceTarget) -> tuple[int, int, int, int]:
@@ -1063,6 +1114,7 @@ _FLOW_INSPECT_JS = r"""(() => {
         inHeader: Boolean(el.closest("header,[role=banner]")),
         inNav: Boolean(el.closest("nav,[role=navigation]")),
         inFooter: Boolean(el.closest("footer,[role=contentinfo]")),
+        disabled: Boolean(el.disabled || el.getAttribute("aria-disabled") === "true"),
         top: Math.round(rect.top),
       };
     })
@@ -1098,23 +1150,64 @@ _FLOW_INSPECT_JS = r"""(() => {
   };
 })()"""
 
-_ROUTE_DISCOVERY_JS = r"""(() => {
+_ROUTE_DISCOVERY_JS = r"""(async () => {
   const textOf = (el) => (el?.innerText || el?.textContent || "").replace(/\s+/g, " ").trim();
-  return Array.from(document.querySelectorAll("a[href],button,[role=button]"))
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const original = location.href;
+  const sameOriginPath = (href) => {
+    if (!href) return "";
+    try {
+      const url = new URL(href, location.href);
+      return url.origin === location.origin ? url.href : "";
+    } catch {
+      return "";
+    }
+  };
+  const controls = Array.from(document.querySelectorAll("a[href],button,[role=button]"))
     .filter((el) => el.offsetParent !== null)
     .slice(0, 120)
     .map((el) => {
       const rect = el.getBoundingClientRect();
+      const anchor = el.closest("a[href]");
       return {
         text: textOf(el) || el.getAttribute("aria-label") || el.getAttribute("title") || "",
-        href: el.href || el.getAttribute("data-href") || "",
+        href: sameOriginPath(el.href || anchor?.href || el.getAttribute("data-href") || ""),
         tag: el.tagName.toLowerCase(),
         inMain: Boolean(el.closest("main,[role=main]")),
         inHeader: Boolean(el.closest("header,[role=banner]")),
         inNav: Boolean(el.closest("nav,[role=navigation]")),
         inFooter: Boolean(el.closest("footer,[role=contentinfo]")),
+        disabled: Boolean(el.disabled || el.getAttribute("aria-disabled") === "true"),
         top: Math.round(rect.top),
+        el,
       };
     })
-    .filter((item) => item.href && item.text);
+    .filter((item) => item.text);
+  const discovered = controls
+    .filter((item) => item.href)
+    .map(({ el, ...item }) => item);
+  const clickCandidates = controls
+    .filter((candidate) => !candidate.href && !candidate.disabled && !candidate.inHeader && !candidate.inNav && !candidate.inFooter)
+    .filter((candidate) => !/devtools|github|repo/i.test(candidate.text))
+    .sort((a, b) => {
+      const score = (item) => /get started|start|try|login|log in|register|sign up/i.test(item.text) ? 2 : 0;
+      return score(b) - score(a);
+    });
+  for (const item of clickCandidates.slice(0, 5)) {
+    try {
+      item.el.click();
+      await wait(350);
+      const href = sameOriginPath(location.href);
+      if (href && href !== original && !discovered.some((existing) => existing.href === href)) {
+        const { el, ...cleaned } = item;
+        discovered.push({ ...cleaned, href, navigatedByClick: true });
+      }
+      history.pushState(null, "", original);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      await wait(100);
+    } catch {
+      history.pushState(null, "", original);
+    }
+  }
+  return discovered;
 })()"""

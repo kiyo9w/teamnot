@@ -15,6 +15,8 @@ from teamnot.customer_loop import (
     OpenClawWindowsCDPRunner,
     OpenClawWindowsFlowRunner,
     OpenClawWindowsInteractiveRunner,
+    OpenClawWindowsResearcherRunner,
+    OpenClawWindowsSessionRunner,
 )
 from teamnot.customer_loop.artifacts import render_customer_report
 from teamnot.customer_loop.models import (
@@ -27,6 +29,8 @@ from teamnot.customer_loop.models import (
     CustomerReport,
     CustomerScores,
     CustomerSeverity,
+    ProductExplorationPlan,
+    ProductRoute,
 )
 from teamnot.customer_loop.orchestrator import default_customer_test_plan
 from teamnot.customer_loop.runners import _path_for_windows_wrapper, _resolve_wrapper_path
@@ -94,6 +98,19 @@ def test_openclaw_runner_converts_absolute_paths_for_windows_wrapper(monkeypatch
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert _path_for_windows_wrapper(tmp_path / "artifact.png") == "C:\\\\wsl\\\\artifact.png"
     assert calls[0][:2] == ["wslpath", "-w"]
+
+
+def test_transient_browser_failures_are_recognized_for_retry():
+    import teamnot.customer_loop.runners as runner_module
+
+    result = subprocess.CompletedProcess(
+        ["scripts/winbrowser", "--action", "navigate"],
+        1,
+        stdout="",
+        stderr="browserType.connectOverCDP: Timeout 30000ms exceeded",
+    )
+
+    assert runner_module._transient_browser_failure(result)
 
 
 def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):
@@ -1033,3 +1050,315 @@ def test_runner_enum_values_are_stable():
     assert CustomerLoopRunnerName.openclaw_windows_cdp.value == "openclaw-windows-cdp"
     assert CustomerLoopRunnerName.openclaw_windows_interactive.value == "openclaw-windows-interactive"
     assert CustomerLoopRunnerName.openclaw_windows_flow.value == "openclaw-windows-flow"
+    assert CustomerLoopRunnerName.openclaw_windows_session.value == "openclaw-windows-session"
+    assert CustomerLoopRunnerName.openclaw_windows_researcher.value == "openclaw-windows-researcher"
+
+
+def test_openclaw_session_runner_explores_and_writes_fresh_flow_artifacts(tmp_path: Path, monkeypatch):
+    import teamnot.customer_loop.runners as runner_module
+
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    target, profile, plan = _plan(tmp_path)
+    exploration = ProductExplorationPlan(
+        target=target,
+        profile=profile,
+        routes=[ProductRoute(route="/", label="Home", priority=10)],
+        journeys=[],
+    )
+    inspected = CustomerFlowPack(
+        name="Inspected",
+        flows=[CustomerFlow(name="Home", steps=[CustomerFlowStep(id="loaded", action="assert_selector", selector="main")])],
+    )
+    runnable = CustomerFlowPack(
+        name="Runnable",
+        flows=[CustomerFlow(name="Home", steps=[CustomerFlowStep(id="loaded", action="assert_selector", selector="body")])],
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(runner_module, "explore_product", lambda *args, **kwargs: calls.append("explore") or exploration)
+    monkeypatch.setattr(runner_module, "routes_from_exploration", lambda plan: calls.append("routes") or ["/"])
+    monkeypatch.setattr(runner_module, "inspect_customer_flow_pack", lambda *args, **kwargs: calls.append("inspect") or inspected)
+    monkeypatch.setattr(
+        runner_module,
+        "make_flow_pack_runnable",
+        lambda flow_pack, **kwargs: calls.append("runnable") or runnable,
+    )
+    monkeypatch.setattr(runner_module, "render_flow_refinement_report", lambda *args, **kwargs: "# report\n")
+    monkeypatch.setattr(
+        OpenClawWindowsSessionRunner,
+        "_explore_screens",
+        lambda self, target, routes, out_dir: calls.append("screens") or {
+            "method": "mock screen exploration",
+            "routes_seeded": routes,
+            "routes_discovered": routes,
+            "actions_executed": 1,
+            "routes": [
+                {
+                    "route": "/",
+                    "entry_screenshot": str(tmp_path / "out" / "screenshots" / "screen.png"),
+                    "actions": [
+                        {
+                            "action": {"text": "Start", "selector": "button"},
+                            "url_changed": True,
+                            "text_changed": True,
+                            "visual_changed": True,
+                            "before_screenshot": str(tmp_path / "out" / "screenshots" / "before.png"),
+                            "after_screenshot": str(tmp_path / "out" / "screenshots" / "after.png"),
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    class FakeFlowRunner:
+        def __init__(self, flow_pack, **kwargs):
+            self.flow_pack = flow_pack
+
+        def run(self, target, profile, plan, out_dir):
+            return CustomerReport(
+                profile=profile,
+                target=target,
+                plan=plan,
+                evidence=[
+                    CustomerEvidence(kind="browser_observation", metadata={}),
+                    CustomerEvidence(kind="browser_flow", metadata={}),
+                ],
+            )
+
+    monkeypatch.setattr(runner_module, "OpenClawWindowsFlowRunner", FakeFlowRunner)
+
+    report = OpenClawWindowsSessionRunner(wrapper_path=wrapper).run(target, profile, plan, tmp_path / "out")
+
+    assert calls == ["explore", "routes", "inspect", "runnable", "screens"]
+    assert (tmp_path / "out" / "product_exploration.yaml").exists()
+    assert (tmp_path / "out" / "screen_exploration.yaml").exists()
+    assert (tmp_path / "out" / "inspected_flow.yaml").exists()
+    assert (tmp_path / "out" / "runnable_flow.yaml").exists()
+    assert (tmp_path / "out" / "flow_refinement_report.md").exists()
+    assert report.evidence[0].metadata["runner"] == "openclaw-windows-session"
+    assert report.evidence[1].metadata["product_exploration"]["routes"][0]["route"] == "/"
+    assert report.evidence[1].metadata["screen_exploration"]["actions_executed"] == 1
+    assert report.evidence[2].kind == "browser_screen_exploration"
+
+
+def test_openclaw_researcher_runner_writes_research_brain_artifacts(tmp_path: Path, monkeypatch):
+    import teamnot.customer_loop.runners as runner_module
+
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    seeded = tmp_path / "seeded-state.yaml"
+    seeded.write_text("email: test@example.com\n", encoding="utf-8")
+    target, profile, plan = _plan(tmp_path)
+    exploration = ProductExplorationPlan(
+        target=target,
+        profile=profile,
+        routes=[ProductRoute(route="/", label="Home", priority=10)],
+        journeys=[],
+    )
+    inspected = CustomerFlowPack(
+        name="Inspected",
+        flows=[CustomerFlow(name="Home", steps=[CustomerFlowStep(id="loaded", action="assert_selector", selector="main")])],
+    )
+    runnable = CustomerFlowPack(
+        name="Runnable",
+        flows=[CustomerFlow(name="Home", steps=[CustomerFlowStep(id="loaded", action="assert_selector", selector="body")])],
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(runner_module, "explore_product", lambda *args, **kwargs: calls.append("explore") or exploration)
+    monkeypatch.setattr(runner_module, "routes_from_exploration", lambda plan, **kwargs: calls.append("routes") or ["/"])
+    monkeypatch.setattr(runner_module, "inspect_customer_flow_pack", lambda *args, **kwargs: calls.append("inspect") or inspected)
+    monkeypatch.setattr(
+        runner_module,
+        "make_flow_pack_runnable",
+        lambda flow_pack, **kwargs: calls.append("runnable") or runnable,
+    )
+    monkeypatch.setattr(runner_module, "render_flow_refinement_report", lambda *args, **kwargs: "# report\n")
+    monkeypatch.setattr(
+        OpenClawWindowsResearcherRunner,
+        "_explore_screens",
+        lambda self, target, routes, out_dir: calls.append("screens") or {
+            "method": "mock screen exploration",
+            "routes_discovered": ["/", "/auth/login"],
+            "actions_executed": 1,
+            "routes": [],
+        },
+    )
+    monkeypatch.setattr(
+        OpenClawWindowsResearcherRunner,
+        "_research_brain_pass",
+        lambda self, target, profile, routes, out_dir: calls.append("brain") or {
+            "method": "mock research brain",
+            "seeded_state_path": str(seeded),
+            "routes_discovered": ["/app"],
+            "actions_executed": 2,
+            "routes": [
+                {
+                    "route": "/",
+                    "entry_screenshot": "observe.png",
+                    "actions": [
+                        {
+                            "action": {"id": "filled-submit-form-0", "kind": "filled_submit"},
+                            "url_changed": True,
+                            "text_changed": True,
+                            "visual_changed": True,
+                            "before_screenshot": "before.png",
+                            "after_screenshot": "after.png",
+                            "before_screenshot_ok": True,
+                            "after_screenshot_ok": True,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    class FakeFlowRunner:
+        def __init__(self, flow_pack, **kwargs):
+            self.flow_pack = flow_pack
+
+        def run(self, target, profile, plan, out_dir):
+            return CustomerReport(
+                profile=profile,
+                target=target,
+                plan=plan,
+                evidence=[
+                    CustomerEvidence(kind="browser_observation", metadata={}),
+                    CustomerEvidence(kind="browser_flow", metadata={}),
+                ],
+            )
+
+    monkeypatch.setattr(runner_module, "OpenClawWindowsFlowRunner", FakeFlowRunner)
+
+    report = OpenClawWindowsResearcherRunner(wrapper_path=wrapper, seeded_state_path=seeded).run(
+        target,
+        profile,
+        plan,
+        tmp_path / "out",
+    )
+
+    assert calls == ["explore", "routes", "screens", "brain", "inspect", "runnable"]
+    assert (tmp_path / "out" / "research_brain.yaml").exists()
+    assert report.evidence[0].metadata["runner"] == "openclaw-windows-researcher"
+    assert report.evidence[1].metadata["research_brain"]["actions_executed"] == 2
+    assert report.evidence[3].kind == "browser_research_brain"
+    assert not any(finding.id == "research-brain-no-seeded-state" for finding in report.findings)
+
+
+def test_screen_exploration_evidence_fails_when_actions_do_not_change_screen():
+    import teamnot.customer_loop.runners as runner_module
+
+    evidence, findings = runner_module._screen_exploration_evidence(
+        {
+            "method": "mock screen exploration",
+            "routes_discovered": ["/"],
+            "routes": [
+                {
+                    "route": "/",
+                    "entry_screenshot": "entry.png",
+                    "actions": [
+                        {
+                            "action": {"text": "Start", "selector": "button"},
+                            "url_changed": False,
+                            "text_changed": False,
+                            "visual_changed": False,
+                            "before_screenshot": "before.png",
+                            "after_screenshot": "after.png",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert evidence.kind == "browser_screen_exploration"
+    assert "STEP_FAIL|screen-action" in evidence.raw_excerpt
+    assert {finding.id for finding in findings} == {
+        "screen-exploration-no-observable-change",
+        "screen-exploration-entry-route-only",
+    }
+
+
+def test_screen_action_filter_rejects_blank_links_and_external_links():
+    import teamnot.customer_loop.runners as runner_module
+
+    target = ExperienceTarget(url="http://127.0.0.1:3000/")
+
+    assert not runner_module._safe_screen_action(
+        {"tag": "a", "text": "", "href": "http://127.0.0.1:3000/"},
+        target,
+    )
+    assert not runner_module._safe_screen_action(
+        {"tag": "a", "text": "GitHub Repo", "href": "https://github.com/example/repo"},
+        target,
+    )
+    assert runner_module._safe_screen_action(
+        {"tag": "a", "text": "Log In", "href": "http://127.0.0.1:3000/auth/login"},
+        target,
+    )
+
+
+def test_research_brain_evidence_flags_missing_seeded_state_and_visual_flakiness():
+    import teamnot.customer_loop.runners as runner_module
+
+    evidence, findings = runner_module._research_brain_evidence(
+        {
+            "method": "mock research brain",
+            "routes_discovered": ["/", "/auth/login"],
+            "routes": [
+                {
+                    "route": "/auth/login",
+                    "entry_screenshot": "entry.png",
+                    "actions": [
+                        {
+                            "action": {"id": "empty-submit-form-0", "kind": "empty_submit"},
+                            "url_changed": False,
+                            "text_changed": True,
+                            "visual_changed": False,
+                            "before_screenshot": "before.png",
+                            "after_screenshot": "after.png",
+                            "before_screenshot_ok": False,
+                            "after_screenshot_ok": True,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert evidence.kind == "browser_research_brain"
+    assert "STEP_PASS|research-auth-login-01" in evidence.raw_excerpt
+    assert {finding.id for finding in findings} == {
+        "research-brain-no-realistic-form-submit",
+        "research-brain-no-seeded-state",
+        "research-brain-screenshot-evidence-flaky",
+    }
+
+
+def test_research_actions_plan_empty_and_filled_submit_before_clicks():
+    import teamnot.customer_loop.runners as runner_module
+
+    actions = runner_module._research_actions_from_observation(
+        {
+            "forms": [
+                {
+                    "index": 0,
+                    "submitText": "Register",
+                    "inputs": [{"name": "email", "type": "email"}],
+                }
+            ],
+            "actions": [
+                {"tag": "a", "text": "Profile", "href": "http://127.0.0.1:3000/profile"},
+                {"tag": "a", "text": "GitHub Repo", "href": "https://github.com/example/repo"},
+            ],
+        },
+        ExperienceTarget(url="http://127.0.0.1:3000/"),
+    )
+
+    assert [action["kind"] for action in actions[:2]] == ["empty_submit", "filled_submit"]
+    assert any(action["kind"] == "click" for action in actions)
+    assert all("GitHub" not in action.get("id", "") for action in actions)

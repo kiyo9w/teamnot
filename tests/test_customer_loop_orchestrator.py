@@ -218,4 +218,68 @@ def test_orchestrator_stops_at_max_iterations_when_findings_remain(tmp_path: Pat
 
     assert result.iterations_completed == 2
     assert result.selected_finding is not None
+    assert result.stopped_reason == "repeated finding after TeamNoT run: blocking"
+
+
+def test_orchestrator_retries_different_findings_until_max_iterations(tmp_path: Path):
+    first = CustomerFinding(id="first", title="First issue", severity=CustomerSeverity.high)
+    second = CustomerFinding(id="second", title="Second issue", severity=CustomerSeverity.high)
+    runner = _SequenceRunner([_report([first]), _report([second])])
+
+    config = CustomerLoopConfig(
+        target=ExperienceTarget(url="https://example-product.test"),
+        profile=_profile(),
+        out_dir=tmp_path / "out",
+        max_iterations=2,
+        severity_threshold=CustomerSeverity.medium,
+        run_teamnot=True,
+    )
+    result = _LoopOrchestrator(runner, run_teamnot_hook=lambda path: None).run(config)
+
+    assert result.iterations_completed == 2
+    assert result.selected_finding is not None
     assert result.stopped_reason == "max iterations reached"
+
+
+def test_orchestrator_writes_summary_when_teamnot_invocation_fails(tmp_path: Path):
+    finding = CustomerFinding(id="blocking", title="Still blocked", severity=CustomerSeverity.high)
+    runner = _SequenceRunner([_report([finding])])
+
+    def fail(_path: Path) -> None:
+        raise RuntimeError("workspace locked")
+
+    config = CustomerLoopConfig(
+        target=ExperienceTarget(url="https://example-product.test"),
+        profile=_profile(),
+        out_dir=tmp_path / "out",
+        max_iterations=3,
+        severity_threshold=CustomerSeverity.medium,
+        run_teamnot=True,
+    )
+    result = _LoopOrchestrator(runner, run_teamnot_hook=fail).run(config)
+
+    assert result.iterations_completed == 1
+    assert result.teamnot_invoked is True
+    assert result.stopped_reason == "TeamNoT invocation failed: workspace locked"
+    assert "workspace locked" in (tmp_path / "out" / "loop_summary.md").read_text(encoding="utf-8")
+
+
+def test_generated_followup_brief_requires_source_change(tmp_path: Path):
+    evidence = tmp_path / "evidence.md"
+    evidence.write_text("Title: Missing trust copy\nSeverity: high\n", encoding="utf-8")
+    config = CustomerLoopConfig(
+        target=ExperienceTarget(url="https://example-product.test"),
+        profile=_profile(),
+        out_dir=tmp_path / "out",
+        evidence_path=evidence,
+    )
+
+    result = CustomerLoopOrchestrator().run(config)
+    assert result.generated_brief is not None
+    loaded = load_brief(tmp_path / "out" / "generated_brief.yaml")
+    check_names = {check.name for check in loaded.definition_of_done.checks}
+
+    assert "source change exists outside TeamNoT artifacts" in check_names
+    assert str((tmp_path / "out" / "customer_report.json").resolve()) in {
+        check.file_exists for check in loaded.definition_of_done.checks
+    }

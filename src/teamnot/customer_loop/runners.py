@@ -6,10 +6,20 @@ import os
 import re
 import subprocess
 from collections.abc import Callable, Sequence
+from hashlib import sha256
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
+from teamnot.customer_loop.flow_planning import (
+    explore_product,
+    inspect_customer_flow_pack,
+    make_flow_pack_runnable,
+    render_flow_refinement_report,
+    routes_from_exploration,
+    suggest_customer_flow_pack,
+)
+from teamnot.customer_loop.io import save_yaml
 from teamnot.customer_loop.models import (
     CustomerEvidence,
     CustomerFinding,
@@ -23,6 +33,8 @@ from teamnot.customer_loop.models import (
     CustomerSeverity,
     CustomerTestPlan,
     ExperienceTarget,
+    ProductExplorationPlan,
+    ProductRoute,
 )
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
@@ -102,13 +114,15 @@ class OpenClawWindowsCDPRunner:
         self._run(["--action", "status"])
         navigate = _parse_json_stdout(self._run(["--action", "navigate", "--url", str(target.url)]))
         self._try_run(["--action", "viewport", "--width", "1280", "--height", "900"])
-        self._run(["--action", "screenshot", "--out", first_impression_out])
-        self._run(["--action", "screenshot", "--out", full_page_out, "--full-page"])
         probe = _parse_json_stdout(self._run(["--action", "eval", "--expr", _CUSTOMER_PROBE_JS]))
         result = probe.get("result", probe)
         mobile_viewport = self._try_run(["--action", "viewport", "--width", "390", "--height", "844"])
         mobile_probe = _parse_json_stdout(self._run(["--action", "eval", "--expr", _MOBILE_PROBE_JS])).get("result", {})
-        self._run(["--action", "screenshot", "--out", mobile_review_out])
+        screenshot_status = {
+            "first_impression": self._try_screenshot(first_impression, first_impression_out),
+            "full_page": self._try_screenshot(full_page, full_page_out, full_page=True),
+            "mobile_review": self._try_screenshot(mobile_review, mobile_review_out),
+        }
         if isinstance(mobile_probe, dict):
             result["mobileProbe"] = mobile_probe
             result["mobileViewport"] = _parse_json_stdout(mobile_viewport) if mobile_viewport else {
@@ -136,6 +150,7 @@ class OpenClawWindowsCDPRunner:
                 "navigate": navigate,
                 "probe": result,
                 "scores": scores.model_dump(),
+                "screenshot_status": screenshot_status,
             },
         )
         for finding in findings:
@@ -155,6 +170,16 @@ class OpenClawWindowsCDPRunner:
 
     def _screenshot(self, path: Path) -> None:
         self._run(["--action", "screenshot", "--out", _path_for_windows_wrapper(path)])
+
+    def _try_screenshot(self, path: Path, out: str | None = None, full_page: bool = False) -> bool:
+        args = ["--action", "screenshot", "--out", out or _path_for_windows_wrapper(path)]
+        if full_page:
+            args.append("--full-page")
+        try:
+            self._run(args)
+        except CustomerLoopRunnerError:
+            return False
+        return path.exists()
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         command = [str(self.wrapper_path), *args]
@@ -186,7 +211,29 @@ class OpenClawWindowsCDPRunner:
 
     @staticmethod
     def _default_runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+        action_pair = tuple(list(command)[1:3])
+        timeout_seconds = 15 if action_pair == ("--action", "screenshot") else 60
+        attempts = 2 if action_pair in {
+            ("--action", "status"),
+            ("--action", "navigate"),
+            ("--action", "eval"),
+            ("--action", "screenshot"),
+        } else 1
+        result: subprocess.CompletedProcess[str] | None = None
+        for attempt in range(attempts):
+            guarded_command = ["timeout", "--kill-after=5s", f"{timeout_seconds}s", *command]
+            result = subprocess.run(
+                guarded_command,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds + 10,
+                check=False,
+            )
+            if result.returncode == 0:
+                return result
+            if attempt == attempts - 1 or not _transient_browser_failure(result):
+                return result
+        return result or subprocess.CompletedProcess(command, 1, stdout="", stderr="browser command did not run")
 
 
 class OpenClawWindowsInteractiveRunner(OpenClawWindowsCDPRunner):
@@ -209,11 +256,11 @@ class OpenClawWindowsInteractiveRunner(OpenClawWindowsCDPRunner):
         before = screenshots / "interactive-before.png"
         after = screenshots / "interactive-after.png"
         self._try_run(["--action", "viewport", "--width", "1280", "--height", "900"])
-        self._screenshot(before)
+        before_screenshot_ok = self._try_screenshot(before)
         interaction = _parse_json_stdout(
             self._run(["--action", "eval", "--expr", _INTERACTIVE_SAMPLE_FLOW_JS])
         ).get("result", {})
-        self._screenshot(after)
+        after_screenshot_ok = self._try_screenshot(after)
         markers, findings = _build_interactive_findings(interaction if isinstance(interaction, dict) else {})
         evidence = CustomerEvidence(
             kind="browser_interaction",
@@ -226,6 +273,10 @@ class OpenClawWindowsInteractiveRunner(OpenClawWindowsCDPRunner):
                 "rubric": "customer-testing-openclaw",
                 "method": "baseline probe plus real sample/demo click with before/after evidence",
                 "interaction": interaction,
+                "screenshot_status": {
+                    "before": before_screenshot_ok,
+                    "after": after_screenshot_ok,
+                },
             },
         )
         report.evidence.append(evidence)
@@ -288,10 +339,21 @@ class OpenClawWindowsFlowRunner(OpenClawWindowsInteractiveRunner):
                 })
             markers.append(f"STEP_PASS|flow-{flow_slug}-start|started customer flow: {flow.name}")
             for step_index, step in enumerate(flow.steps, start=1):
-                result = self._run_flow_step(step, target)
+                try:
+                    result = self._run_flow_step(step, target)
+                except CustomerLoopRunnerError as exc:
+                    if step.action == "upload":
+                        raise
+                    result = {
+                        "id": step.id,
+                        "action": step.action,
+                        "passed": False,
+                        "summary": f"flow step failed at browser layer: {exc}",
+                    }
                 flow_results.append({"flow": flow.name, **result})
                 shot = screenshots / f"flow-{flow_index:02d}-{step_index:02d}-{flow_slug}-{_slug(step.id)}.png"
-                self._screenshot(shot)
+                screenshot_ok = self._try_screenshot(shot)
+                result["screenshot_ok"] = screenshot_ok
                 screenshot_paths.append(str(shot))
                 marker_id = f"flow-{flow_slug}-{step.id}"
                 if result.get("passed"):
@@ -390,6 +452,404 @@ class OpenClawWindowsFlowRunner(OpenClawWindowsInteractiveRunner):
         return {"id": step.id, "action": step.action, **result}
 
 
+class OpenClawWindowsSessionRunner(OpenClawWindowsCDPRunner):
+    """Explore the current product, derive flows, execute them, and report in one runner call."""
+
+    def __init__(
+        self,
+        wrapper_path: str | Path = "scripts/winbrowser",
+        command_runner: CommandRunner | None = None,
+        file_fixture_path: str | Path | None = None,
+    ):
+        super().__init__(wrapper_path=wrapper_path, command_runner=command_runner)
+        self.file_fixture_path = Path(file_fixture_path).expanduser() if file_fixture_path else None
+
+    def run(
+        self,
+        target: ExperienceTarget,
+        profile: CustomerProfile,
+        plan: CustomerTestPlan,
+        out_dir: Path,
+    ) -> CustomerReport:
+        exploration = _safe_explore_product(target, profile, self.wrapper_path, self.command_runner)
+        planned_routes = routes_from_exploration(exploration)
+        inspected = _safe_inspect_customer_flow_pack(
+            target,
+            profile,
+            planned_routes,
+            self.wrapper_path,
+            self.command_runner,
+        )
+        runnable = make_flow_pack_runnable(inspected, file_fixture_path=self.file_fixture_path)
+        screen_exploration = self._explore_screens(target, planned_routes, out_dir)
+        save_yaml(exploration, out_dir / "product_exploration.yaml")
+        save_yaml(screen_exploration, out_dir / "screen_exploration.yaml")
+        save_yaml(inspected, out_dir / "inspected_flow.yaml")
+        save_yaml(runnable, out_dir / "runnable_flow.yaml")
+
+        try:
+            report = OpenClawWindowsFlowRunner(
+                runnable,
+                wrapper_path=self.wrapper_path,
+                command_runner=self.command_runner,
+            ).run(target, profile, plan, out_dir)
+        except CustomerLoopRunnerError as exc:
+            report = _degraded_browser_report(target, profile, plan, "openclaw-windows-session", exc)
+        if report.evidence:
+            report.evidence[0].metadata["runner"] = "openclaw-windows-session"
+            report.evidence[0].metadata["method"] = (
+                "fresh product exploration, inspected flow planning, and real Windows Chrome flow execution"
+            )
+            report.evidence[-1].metadata["product_exploration"] = exploration.model_dump(mode="json")
+            report.evidence[-1].metadata["screen_exploration"] = screen_exploration
+            report.evidence[-1].metadata["inspected_flow_pack"] = inspected.model_dump(mode="json")
+            report.evidence[-1].metadata["runnable_flow_pack_path"] = str(out_dir / "runnable_flow.yaml")
+        screen_evidence, screen_findings = _screen_exploration_evidence(screen_exploration)
+        report.evidence.append(screen_evidence)
+        for finding in screen_findings:
+            finding.evidence.append(screen_evidence)
+        report.findings.extend(screen_findings)
+        (out_dir / "flow_refinement_report.md").write_text(
+            render_flow_refinement_report(inspected, runnable, report),
+            encoding="utf-8",
+        )
+        report.summary = (
+            "Customer-testing-openclaw session completed with fresh product exploration, "
+            "flow inspection, and real Windows CDP flow execution. "
+            f"{len(report.findings)} customer-impact finding(s) identified."
+        )
+        return report
+
+    def _explore_screens(
+        self,
+        target: ExperienceTarget,
+        routes: list[str],
+        out_dir: Path,
+    ) -> dict:
+        screenshots = out_dir / "screenshots" / "screen-exploration"
+        screenshots.mkdir(parents=True, exist_ok=True)
+        route_results: list[dict] = []
+        discovered_routes = set(routes)
+        action_budget = 12
+        actions_used = 0
+        self._try_run(["--action", "viewport", "--width", "1280", "--height", "900"])
+        for route_index, route in enumerate(routes[:5], start=1):
+            if actions_used >= action_budget:
+                break
+            route_url = _flow_url(target, route)
+            try:
+                navigate = _parse_json_stdout(self._run(["--action", "navigate", "--url", route_url]))
+            except CustomerLoopRunnerError as exc:
+                route_results.append({
+                    "route": route,
+                    "url": route_url,
+                    "navigate": {"ok": False, "error": str(exc)},
+                    "entry_screenshot": "",
+                    "entry_screenshot_ok": False,
+                    "entry_hash": "",
+                    "visible_action_count": 0,
+                    "safe_action_count": 0,
+                    "actions": [],
+                })
+                continue
+            entry_shot = screenshots / f"route-{route_index:02d}-{_slug(route)}-entry.png"
+            entry_screenshot_ok = self._try_screenshot_for_exploration(entry_shot)
+            entry_hash = _file_sha256(entry_shot)
+            candidates_raw = _parse_json_stdout(
+                self._run(["--action", "eval", "--expr", _SCREEN_ACTION_DISCOVERY_JS])
+            ).get("result", [])
+            candidates = candidates_raw if isinstance(candidates_raw, list) else []
+            safe_candidates = _rank_screen_actions([
+                candidate for candidate in candidates
+                if isinstance(candidate, dict) and _safe_screen_action(candidate, target)
+            ])
+            action_results: list[dict] = []
+            for action_index, candidate in enumerate(safe_candidates[:4], start=1):
+                if actions_used >= action_budget:
+                    break
+                actions_used += 1
+                before_shot = screenshots / (
+                    f"route-{route_index:02d}-action-{action_index:02d}-{_slug(candidate.get('text', '') or candidate.get('selector', 'action'))}-before.png"
+                )
+                after_shot = screenshots / (
+                    f"route-{route_index:02d}-action-{action_index:02d}-{_slug(candidate.get('text', '') or candidate.get('selector', 'action'))}-after.png"
+                )
+                try:
+                    self._parse_or_reset_navigation(target, route)
+                except CustomerLoopRunnerError:
+                    pass
+                before_screenshot_ok = self._try_screenshot_for_exploration(before_shot)
+                before_hash = _file_sha256(before_shot)
+                try:
+                    click_result = _parse_json_stdout(
+                        self._run(["--action", "eval", "--expr", _screen_action_click_expr(candidate)])
+                    ).get("result", {})
+                except CustomerLoopRunnerError as exc:
+                    click_result = {
+                        "ok": False,
+                        "summary": f"screen action failed: {exc}",
+                        "beforeUrl": route_url,
+                        "afterUrl": route_url,
+                        "beforeTextSample": "",
+                        "afterTextSample": "",
+                    }
+                after_screenshot_ok = self._try_screenshot_for_exploration(after_shot)
+                after_hash = _file_sha256(after_shot)
+                if not isinstance(click_result, dict):
+                    click_result = {"ok": False, "summary": "screen action returned non-object result"}
+                after_url = str(click_result.get("afterUrl", ""))
+                route_after = _route_from_url(after_url, target)
+                if route_after:
+                    discovered_routes.add(route_after)
+                visual_changed = bool(before_hash and after_hash and before_hash != after_hash)
+                text_changed = click_result.get("beforeTextSample") != click_result.get("afterTextSample")
+                url_changed = click_result.get("beforeUrl") != click_result.get("afterUrl")
+                action_results.append({
+                    "action": _clean_screen_action(candidate),
+                    "passed": bool(click_result.get("ok")),
+                    "url_changed": bool(url_changed),
+                    "text_changed": bool(text_changed),
+                    "visual_changed": visual_changed,
+                    "before_screenshot": str(before_shot),
+                    "after_screenshot": str(after_shot),
+                    "before_screenshot_ok": before_screenshot_ok,
+                    "after_screenshot_ok": after_screenshot_ok,
+                    "before_hash": before_hash,
+                    "after_hash": after_hash,
+                    "result": click_result,
+                })
+            route_results.append({
+                "route": route,
+                "url": route_url,
+                "navigate": navigate,
+                "entry_screenshot": str(entry_shot),
+                "entry_screenshot_ok": entry_screenshot_ok,
+                "entry_hash": entry_hash,
+                "visible_action_count": len(candidates),
+                "safe_action_count": len(safe_candidates),
+                "actions": action_results,
+            })
+        return {
+            "method": "Windows Chrome/CDP screen exploration with screenshots before and after safe customer actions",
+            "routes_seeded": routes,
+            "routes_discovered": sorted(discovered_routes),
+            "action_budget": action_budget,
+            "actions_executed": actions_used,
+            "routes": route_results,
+        }
+
+    def _parse_or_reset_navigation(self, target: ExperienceTarget, route: str) -> dict:
+        return _parse_json_stdout(self._run(["--action", "navigate", "--url", _flow_url(target, route)]))
+
+    def _try_screenshot_for_exploration(self, path: Path) -> bool:
+        try:
+            self._screenshot(path)
+        except CustomerLoopRunnerError:
+            return False
+        return path.exists()
+
+
+class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
+    """Run a broader customer-research loop with observation, planning, and branch evidence."""
+
+    def __init__(
+        self,
+        wrapper_path: str | Path = "scripts/winbrowser",
+        command_runner: CommandRunner | None = None,
+        file_fixture_path: str | Path | None = None,
+        seeded_state_path: str | Path | None = None,
+    ):
+        super().__init__(
+            wrapper_path=wrapper_path,
+            command_runner=command_runner,
+            file_fixture_path=file_fixture_path,
+        )
+        self.seeded_state_path = Path(seeded_state_path).expanduser() if seeded_state_path else None
+
+    def run(
+        self,
+        target: ExperienceTarget,
+        profile: CustomerProfile,
+        plan: CustomerTestPlan,
+        out_dir: Path,
+    ) -> CustomerReport:
+        exploration = _safe_explore_product(target, profile, self.wrapper_path, self.command_runner)
+        planned_routes = routes_from_exploration(exploration, max_routes=9)
+        screen_exploration = self._explore_screens(target, planned_routes, out_dir)
+        research_brain = self._research_brain_pass(target, profile, planned_routes, out_dir)
+        routes_for_flow = _dedupe_strings([
+            *planned_routes,
+            *screen_exploration.get("routes_discovered", []),
+            *research_brain.get("routes_discovered", []),
+        ])[:9]
+        inspected = _safe_inspect_customer_flow_pack(
+            target,
+            profile,
+            routes_for_flow,
+            self.wrapper_path,
+            self.command_runner,
+        )
+        runnable = make_flow_pack_runnable(inspected, file_fixture_path=self.file_fixture_path)
+        save_yaml(exploration, out_dir / "product_exploration.yaml")
+        save_yaml(screen_exploration, out_dir / "screen_exploration.yaml")
+        save_yaml(research_brain, out_dir / "research_brain.yaml")
+        save_yaml(inspected, out_dir / "inspected_flow.yaml")
+        save_yaml(runnable, out_dir / "runnable_flow.yaml")
+
+        try:
+            report = OpenClawWindowsFlowRunner(
+                runnable,
+                wrapper_path=self.wrapper_path,
+                command_runner=self.command_runner,
+            ).run(target, profile, plan, out_dir)
+        except CustomerLoopRunnerError as exc:
+            report = _degraded_browser_report(target, profile, plan, "openclaw-windows-researcher", exc)
+        if report.evidence:
+            report.evidence[0].metadata["runner"] = "openclaw-windows-researcher"
+            report.evidence[0].metadata["method"] = (
+                "agentic customer researcher runtime: route exploration, screen actions, form/adversarial branches, "
+                "and configured flow execution in real Windows Chrome/CDP"
+            )
+            report.evidence[-1].metadata["product_exploration"] = exploration.model_dump(mode="json")
+            report.evidence[-1].metadata["screen_exploration"] = screen_exploration
+            report.evidence[-1].metadata["research_brain"] = research_brain
+            report.evidence[-1].metadata["inspected_flow_pack"] = inspected.model_dump(mode="json")
+            report.evidence[-1].metadata["runnable_flow_pack_path"] = str(out_dir / "runnable_flow.yaml")
+        for evidence, findings in (
+            _screen_exploration_evidence(screen_exploration),
+            _research_brain_evidence(research_brain),
+        ):
+            report.evidence.append(evidence)
+            for finding in findings:
+                finding.evidence.append(evidence)
+            report.findings.extend(findings)
+        (out_dir / "flow_refinement_report.md").write_text(
+            render_flow_refinement_report(inspected, runnable, report),
+            encoding="utf-8",
+        )
+        report.summary = (
+            "Customer-testing-openclaw researcher run completed with product exploration, "
+            "screen-level action evidence, form/adversarial branch testing, and real Windows CDP flow execution. "
+            f"{len(report.findings)} customer-impact finding(s) identified."
+        )
+        return report
+
+    def _research_brain_pass(
+        self,
+        target: ExperienceTarget,
+        profile: CustomerProfile,
+        routes: list[str],
+        out_dir: Path,
+    ) -> dict:
+        screenshots = out_dir / "screenshots" / "research-brain"
+        screenshots.mkdir(parents=True, exist_ok=True)
+        action_budget = 18
+        actions_used = 0
+        route_results: list[dict] = []
+        discovered_routes = set(routes)
+        hypotheses = _research_hypotheses(profile)
+        self._try_run(["--action", "viewport", "--width", "1280", "--height", "900"])
+        for route_index, route in enumerate(routes[:6], start=1):
+            if actions_used >= action_budget:
+                break
+            route_url = _flow_url(target, route)
+            try:
+                navigate = _parse_json_stdout(self._run(["--action", "navigate", "--url", route_url]))
+                observation = _parse_json_stdout(
+                    self._run(["--action", "eval", "--expr", _RESEARCH_OBSERVE_JS])
+                ).get("result", {})
+            except CustomerLoopRunnerError as exc:
+                route_results.append({
+                    "route": route,
+                    "url": route_url,
+                    "navigate": {"ok": False, "error": str(exc)},
+                    "observation": {},
+                    "entry_screenshot": "",
+                    "entry_screenshot_ok": False,
+                    "planned_actions": [],
+                    "actions": [],
+                })
+                continue
+            if not isinstance(observation, dict):
+                observation = {}
+            entry_shot = screenshots / f"route-{route_index:02d}-{_slug(route)}-observe.png"
+            entry_screenshot_ok = self._try_screenshot_for_exploration(entry_shot)
+            planned_actions = _research_actions_from_observation(observation, target)
+            action_results: list[dict] = []
+            for action_index, action in enumerate(planned_actions[:5], start=1):
+                if actions_used >= action_budget:
+                    break
+                actions_used += 1
+                before_shot = screenshots / (
+                    f"route-{route_index:02d}-action-{action_index:02d}-{_slug(action.get('id', 'action'))}-before.png"
+                )
+                after_shot = screenshots / (
+                    f"route-{route_index:02d}-action-{action_index:02d}-{_slug(action.get('id', 'action'))}-after.png"
+                )
+                try:
+                    self._parse_or_reset_navigation(target, route)
+                except CustomerLoopRunnerError:
+                    pass
+                before_screenshot_ok = self._try_screenshot_for_exploration(before_shot)
+                before_hash = _file_sha256(before_shot)
+                try:
+                    result = _parse_json_stdout(
+                        self._run(["--action", "eval", "--expr", _research_action_expr(action)])
+                    ).get("result", {})
+                except CustomerLoopRunnerError as exc:
+                    result = {
+                        "ok": False,
+                        "summary": f"research action failed: {exc}",
+                        "beforeUrl": route_url,
+                        "afterUrl": route_url,
+                        "beforeTextSample": "",
+                        "afterTextSample": "",
+                    }
+                after_screenshot_ok = self._try_screenshot_for_exploration(after_shot)
+                after_hash = _file_sha256(after_shot)
+                if not isinstance(result, dict):
+                    result = {"ok": False, "summary": "research action returned non-object result"}
+                route_after = _route_from_url(str(result.get("afterUrl", "")), target)
+                if route_after:
+                    discovered_routes.add(route_after)
+                action_results.append({
+                    "action": action,
+                    "passed": bool(result.get("ok")),
+                    "url_changed": result.get("beforeUrl") != result.get("afterUrl"),
+                    "text_changed": result.get("beforeTextSample") != result.get("afterTextSample"),
+                    "visual_changed": bool(before_hash and after_hash and before_hash != after_hash),
+                    "before_screenshot": str(before_shot),
+                    "after_screenshot": str(after_shot),
+                    "before_screenshot_ok": before_screenshot_ok,
+                    "after_screenshot_ok": after_screenshot_ok,
+                    "result": result,
+                })
+            route_results.append({
+                "route": route,
+                "url": route_url,
+                "navigate": navigate,
+                "observation": observation,
+                "entry_screenshot": str(entry_shot),
+                "entry_screenshot_ok": entry_screenshot_ok,
+                "planned_actions": planned_actions,
+                "actions": action_results,
+            })
+        return {
+            "method": "agentic customer researcher loop using Windows CDP observations, planned branches, realistic form fills, and before/after evidence",
+            "seeded_state_path": str(self.seeded_state_path) if self.seeded_state_path else "",
+            "state_policy": (
+                "seeded account/state available" if self.seeded_state_path else
+                "no seeded account/state provided; authenticated product depth remains a coverage gap"
+            ),
+            "hypotheses": hypotheses,
+            "routes_seeded": routes,
+            "routes_discovered": sorted(discovered_routes),
+            "action_budget": action_budget,
+            "actions_executed": actions_used,
+            "routes": route_results,
+        }
+
+
 def _first_nonempty_line(text: str) -> str:
     for line in text.splitlines():
         cleaned = line.strip(" #\t")
@@ -406,6 +866,17 @@ def _parse_json_stdout(result: subprocess.CompletedProcess[str]) -> dict:
     if isinstance(parsed, dict) and parsed.get("ok") is False:
         raise CustomerLoopRunnerError(f"OpenClaw wrapper reported failure: {parsed}")
     return parsed if isinstance(parsed, dict) else {"result": parsed}
+
+
+def _transient_browser_failure(result: subprocess.CompletedProcess[str]) -> bool:
+    text = f"{result.stdout}\n{result.stderr}".lower()
+    return (
+        "timeouterror" in text
+        or "timeout" in text
+        or "connectovercdp" in text
+        or "connection closed" in text
+        or result.returncode in {124, 137, 143}
+    )
 
 
 def _mark_primary_workflow_covered_by_flow(raw_excerpt: str) -> str:
@@ -460,10 +931,115 @@ def _slug(value: str) -> str:
     return cleaned or "step"
 
 
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
 def _normalize_flow_pack(flow_pack: CustomerFlow | CustomerFlowPack) -> CustomerFlowPack:
     if isinstance(flow_pack, CustomerFlowPack):
         return flow_pack
     return CustomerFlowPack(name=flow_pack.name, flows=[flow_pack])
+
+
+def _safe_explore_product(
+    target: ExperienceTarget,
+    profile: CustomerProfile,
+    wrapper_path: Path,
+    command_runner: CommandRunner,
+) -> ProductExplorationPlan:
+    try:
+        return explore_product(
+            target,
+            profile,
+            wrapper_path=wrapper_path,
+            command_runner=command_runner,
+        )
+    except (RuntimeError, CustomerLoopRunnerError, FileNotFoundError) as exc:
+        base_route = _route_from_url(str(target.url), target) or "/"
+        return ProductExplorationPlan(
+            target=target,
+            profile=profile,
+            routes=[
+                ProductRoute(
+                    route=base_route,
+                    url=str(target.url),
+                    label="Entry route",
+                    kind="landing",
+                    priority=10,
+                    reasons=["fallback after browser route exploration failed"],
+                    coverage_status="partial",
+                )
+            ],
+            journeys=[],
+            personas=[profile.persona],
+            coverage_gaps=[f"Browser route exploration failed: {str(exc).splitlines()[0][:240]}"],
+            notes="Fallback exploration plan generated so the customer run can continue and report evidence instead of crashing.",
+        )
+
+
+def _safe_inspect_customer_flow_pack(
+    target: ExperienceTarget,
+    profile: CustomerProfile,
+    routes: list[str],
+    wrapper_path: Path,
+    command_runner: CommandRunner,
+) -> CustomerFlowPack:
+    try:
+        return inspect_customer_flow_pack(
+            target,
+            profile,
+            routes,
+            wrapper_path=wrapper_path,
+            command_runner=command_runner,
+        )
+    except (RuntimeError, CustomerLoopRunnerError, FileNotFoundError):
+        return suggest_customer_flow_pack(target, profile, routes=routes or ["/"])
+
+
+def _degraded_browser_report(
+    target: ExperienceTarget,
+    profile: CustomerProfile,
+    plan: CustomerTestPlan,
+    runner_name: str,
+    error: Exception,
+) -> CustomerReport:
+    evidence = CustomerEvidence(
+        kind="browser_runtime_failure",
+        observed_behavior=f"{runner_name} browser runtime failed before full evidence collection.",
+        raw_excerpt=str(error),
+        metadata={
+            "runner": runner_name,
+            "rubric": "customer-testing-openclaw",
+            "method": "degraded browser failure report",
+            "error": str(error),
+        },
+    )
+    finding = _browser_finding(
+        "browser-runtime-failed",
+        "Browser/CDP runtime failed before full customer evidence collection",
+        CustomerSeverity.high,
+        "The customer researcher could not complete the run because the browser control layer failed.",
+        "TeamNoT cannot claim customer-readiness when the evidence collector itself is unstable.",
+        "Every customer-loop run on this environment until the CDP/screenshot primitive is stable.",
+        "Harden the Windows CDP wrapper, retry failed primitives, or switch to a stable browser backend before merge.",
+        core=True,
+    )
+    finding.evidence.append(evidence)
+    return CustomerReport(
+        profile=profile,
+        target=target,
+        plan=plan,
+        findings=[finding],
+        evidence=[evidence],
+        summary=f"{runner_name} produced a degraded report because browser runtime failed.",
+    )
 
 
 def _flow_url(target: ExperienceTarget, url_or_path: str) -> str:
@@ -471,6 +1047,528 @@ def _flow_url(target: ExperienceTarget, url_or_path: str) -> str:
     if not value:
         return str(target.url)
     return urljoin(str(target.url), value)
+
+
+def _route_from_url(url: str, target: ExperienceTarget) -> str:
+    if not url:
+        return ""
+    parsed_target = urlparse(str(target.url))
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.netloc and parsed.netloc != parsed_target.netloc:
+        return ""
+    path = parsed.path or "/"
+    return path if path.startswith("/") else f"/{path}"
+
+
+def _file_sha256(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return sha256(path.read_bytes()).hexdigest()
+
+
+def _clean_screen_action(action: dict) -> dict:
+    return {
+        "text": str(action.get("text", ""))[:160],
+        "selector": str(action.get("selector", ""))[:240],
+        "href": str(action.get("href", ""))[:240],
+        "tag": str(action.get("tag", "")),
+        "role": str(action.get("role", "")),
+        "in_main": bool(action.get("inMain")),
+        "in_nav": bool(action.get("inNav")),
+        "in_header": bool(action.get("inHeader")),
+        "in_footer": bool(action.get("inFooter")),
+        "top": action.get("top"),
+    }
+
+
+def _safe_screen_action(action: dict, target: ExperienceTarget) -> bool:
+    text = str(action.get("text", "")).lower()
+    href = str(action.get("href", "")).lower()
+    combined = f"{text} {href}"
+    unsafe_terms = (
+        "delete", "remove", "destroy", "purchase", "buy", "checkout", "pay",
+        "subscribe", "logout", "sign out", "download", "installer",
+    )
+    low_value_terms = (
+        "skip", "github", "repo", "devtools", "developer tools", "open tanstack",
+        "cookie", "terms", "privacy policy",
+    )
+    if action.get("disabled"):
+        return False
+    if any(term in combined for term in unsafe_terms):
+        return False
+    if any(term in combined for term in low_value_terms):
+        return False
+    if href:
+        parsed = urlparse(href)
+        target_netloc = urlparse(str(target.url)).netloc
+        if parsed.scheme in {"http", "https"} and parsed.netloc and parsed.netloc != target_netloc:
+            return False
+    if str(action.get("tag", "")).lower() == "a" and not text:
+        return False
+    return bool(text or action.get("selector"))
+
+
+def _rank_screen_actions(actions: list[dict]) -> list[dict]:
+    return sorted(actions, key=_screen_action_rank, reverse=True)
+
+
+def _screen_action_rank(action: dict) -> tuple[int, int, int, int]:
+    text = str(action.get("text", "")).lower()
+    selector = str(action.get("selector", "")).lower()
+    combined = f"{text} {selector}"
+    primary_terms = (
+        "get started", "start", "try", "demo", "create", "register", "sign up",
+        "login", "log in", "continue", "submit", "save", "new", "add", "open",
+        "view", "details", "profile", "settings",
+    )
+    low_value_terms = (
+        "skip", "menu", "github", "repo", "terms", "privacy", "cookie",
+    )
+    primary_score = sum(2 for term in primary_terms if term in combined)
+    region_score = 3 if action.get("inMain") else 0
+    if action.get("inNav") or action.get("inHeader"):
+        region_score -= 1
+    if action.get("inFooter"):
+        region_score -= 3
+    low_value_penalty = -4 if any(term in combined for term in low_value_terms) else 0
+    top = action.get("top")
+    top_score = -abs(int(top)) if isinstance(top, int) else 0
+    return primary_score + region_score + low_value_penalty, len(text), top_score, -len(selector)
+
+
+def _screen_exploration_evidence(screen_exploration: dict) -> tuple[CustomerEvidence, list[CustomerFinding]]:
+    actions = [
+        action
+        for route in screen_exploration.get("routes", [])
+        if isinstance(route, dict)
+        for action in route.get("actions", [])
+        if isinstance(action, dict)
+    ]
+    changed_actions = [
+        action for action in actions
+        if action.get("url_changed") or action.get("text_changed") or action.get("visual_changed")
+    ]
+    failed_actions = [action for action in actions if action.get("passed") is False]
+    screenshot_paths: list[str] = []
+    markers: list[str] = []
+    for route in screen_exploration.get("routes", []):
+        if not isinstance(route, dict):
+            continue
+        if route.get("entry_screenshot"):
+            screenshot_paths.append(str(route["entry_screenshot"]))
+        if not route.get("actions"):
+            markers.append(
+                f"STEP_SKIP|screen-route-{_slug(str(route.get('route', 'route')))}|"
+                f"no safe visible actions executed on {route.get('route', '')}"
+            )
+        for index, action in enumerate(route.get("actions", []), start=1):
+            if not isinstance(action, dict):
+                continue
+            screenshot_paths.extend([
+                str(action.get("before_screenshot", "")),
+                str(action.get("after_screenshot", "")),
+            ])
+            changed = action.get("url_changed") or action.get("text_changed") or action.get("visual_changed")
+            marker = "STEP_PASS" if changed else "STEP_FAIL"
+            action_text = action.get("action", {}).get("text") or action.get("action", {}).get("selector", "action")
+            markers.append(
+                f"{marker}|screen-action-{_slug(str(route.get('route', 'route')))}-{index:02d}|"
+                f"{action_text}: url_changed={bool(action.get('url_changed'))}, "
+                f"text_changed={bool(action.get('text_changed'))}, visual_changed={bool(action.get('visual_changed'))}"
+            )
+    screenshot_paths = [path for path in screenshot_paths if path]
+    evidence = CustomerEvidence(
+        kind="browser_screen_exploration",
+        path=screenshot_paths[0] if screenshot_paths else "",
+        screenshot_paths=screenshot_paths,
+        observed_behavior=(
+            f"Executed {len(actions)} safe screen action(s) across "
+            f"{len(screen_exploration.get('routes', []))} route(s); "
+            f"{len(changed_actions)} produced observable URL/text/screenshot change."
+        ),
+        raw_excerpt="\n".join(markers),
+        metadata={
+            "runner": "openclaw-windows-session",
+            "rubric": "customer-testing-openclaw",
+            "method": screen_exploration.get("method", ""),
+            "screen_exploration": screen_exploration,
+        },
+    )
+    findings: list[CustomerFinding] = []
+    if not actions:
+        findings.append(_browser_finding(
+            "screen-exploration-no-actions",
+            "Screen exploration found no safe customer actions to exercise",
+            CustomerSeverity.high,
+            "The runner stayed at observation level instead of behaving like a customer who tries the product.",
+            "TeamNoT may overstate readiness because it did not actually attempt meaningful interaction.",
+            "Every product without a pre-authored flow pack.",
+            "Improve route/action discovery or provide product flow hints so the runner can execute real user journeys.",
+            core=True,
+        ))
+    elif not changed_actions:
+        findings.append(_browser_finding(
+            "screen-exploration-no-observable-change",
+            "Customer actions produced no observable screen change",
+            CustomerSeverity.high,
+            "The runner clicked visible actions but did not observe a changed URL, text state, or screenshot.",
+            "A loop can falsely look complete while still being stuck on the same surface.",
+            "Every product whose key flows require multi-step state, auth, or custom controls.",
+            "Treat this as an exploration failure and add deeper action planning or seeded state before merge.",
+            core=True,
+        ))
+    if failed_actions:
+        findings.append(_browser_finding(
+            "screen-exploration-action-failures",
+            "Some screen exploration actions failed at runtime",
+            CustomerSeverity.medium,
+            "The runner attempted customer-visible actions but the browser action primitive failed.",
+            "Coverage may be incomplete even when route discovery succeeds.",
+            "Products or environments where CDP/eval/screenshot intermittently fails.",
+            "Keep the loop alive, record failed actions as evidence, and retry or choose alternate branches.",
+        ))
+    if len(screen_exploration.get("routes_discovered", [])) <= 1:
+        findings.append(_browser_finding(
+            "screen-exploration-entry-route-only",
+            "Exploration did not escape the entry route",
+            CustomerSeverity.medium,
+            "The customer-style session did not build evidence across multiple product screens.",
+            "The feature remains biased toward landing-page assessment for larger products.",
+            "Products with dashboards, auth, settings, records, or multi-screen workflows.",
+            "Use screen-driven route expansion and seeded auth/account flows before claiming general product coverage.",
+        ))
+    return evidence, findings
+
+
+def _research_hypotheses(profile: CustomerProfile) -> list[str]:
+    hypotheses = [
+        "Can the customer understand the product promise from the first screen?",
+        "Can the customer start a realistic workflow without developer guidance?",
+        "Can the customer recover from empty or invalid input?",
+        "Does the product expose proof for trust, state, permissions, and adoption risk?",
+    ]
+    if profile.buyer_user_split:
+        hypotheses.append("Do daily-user and buyer/security concerns diverge?")
+    if profile.current_workflow or profile.alternatives:
+        hypotheses.append("Is there enough evidence to switch away from the current workflow?")
+    return hypotheses
+
+
+def _research_actions_from_observation(observation: dict, target: ExperienceTarget) -> list[dict]:
+    actions: list[dict] = []
+    forms = observation.get("forms", []) if isinstance(observation.get("forms"), list) else []
+    for form in forms[:2]:
+        if not isinstance(form, dict):
+            continue
+        form_index = int(form.get("index", 0))
+        if form.get("submitSelector") or form.get("submitText"):
+            actions.append({
+                "id": f"empty-submit-form-{form_index}",
+                "kind": "empty_submit",
+                "form_index": form_index,
+                "goal": "Exercise mistake recovery by submitting required fields empty.",
+            })
+            if form.get("inputs"):
+                actions.append({
+                    "id": f"filled-submit-form-{form_index}",
+                    "kind": "filled_submit",
+                    "form_index": form_index,
+                    "goal": "Exercise the realistic first-value form path with generated customer input.",
+                })
+    raw_actions = observation.get("actions", []) if isinstance(observation.get("actions"), list) else []
+    safe_actions = _rank_screen_actions([
+        action for action in raw_actions
+        if isinstance(action, dict) and _safe_screen_action(action, target)
+    ])
+    for action in safe_actions[:4]:
+        clean = _clean_screen_action(action)
+        if clean.get("text", "").lower() in {"register", "log in", "login"} and actions:
+            continue
+        actions.append({
+            "id": f"click-{_slug(clean.get('text') or clean.get('selector') or 'action')}",
+            "kind": "click",
+            "goal": "Explore the next visible customer branch.",
+            "action": clean,
+        })
+    return actions[:6]
+
+
+def _research_brain_evidence(research_brain: dict) -> tuple[CustomerEvidence, list[CustomerFinding]]:
+    routes = research_brain.get("routes", []) if isinstance(research_brain.get("routes"), list) else []
+    actions = [
+        action
+        for route in routes
+        if isinstance(route, dict)
+        for action in route.get("actions", [])
+        if isinstance(action, dict)
+    ]
+    filled_submit_actions = [
+        action for action in actions
+        if action.get("action", {}).get("kind") == "filled_submit"
+    ]
+    changed_actions = [
+        action for action in actions
+        if action.get("url_changed") or action.get("text_changed") or action.get("visual_changed")
+    ]
+    failed_actions = [action for action in actions if action.get("passed") is False]
+    screenshot_failures = [
+        action for action in actions
+        if not action.get("before_screenshot_ok") or not action.get("after_screenshot_ok")
+    ]
+    markers: list[str] = []
+    screenshot_paths: list[str] = []
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        if route.get("entry_screenshot"):
+            screenshot_paths.append(str(route["entry_screenshot"]))
+        for index, action in enumerate(route.get("actions", []), start=1):
+            if not isinstance(action, dict):
+                continue
+            screenshot_paths.extend([
+                str(action.get("before_screenshot", "")),
+                str(action.get("after_screenshot", "")),
+            ])
+            marker = "STEP_PASS" if (
+                action.get("url_changed") or action.get("text_changed") or action.get("visual_changed")
+            ) else "STEP_FAIL"
+            planned = action.get("action", {})
+            markers.append(
+                f"{marker}|research-{_slug(str(route.get('route', 'route')))}-{index:02d}|"
+                f"{planned.get('kind', 'action')} {planned.get('id', '')}: "
+                f"url_changed={bool(action.get('url_changed'))}, "
+                f"text_changed={bool(action.get('text_changed'))}, "
+                f"visual_changed={bool(action.get('visual_changed'))}"
+            )
+    screenshot_paths = [path for path in screenshot_paths if path]
+    evidence = CustomerEvidence(
+        kind="browser_research_brain",
+        path=screenshot_paths[0] if screenshot_paths else "",
+        screenshot_paths=screenshot_paths,
+        observed_behavior=(
+            f"Research brain executed {len(actions)} planned branch action(s) across "
+            f"{len(routes)} route(s); {len(changed_actions)} produced observable change."
+        ),
+        raw_excerpt="\n".join(markers),
+        metadata={
+            "runner": "openclaw-windows-researcher",
+            "rubric": "customer-testing-openclaw",
+            "method": research_brain.get("method", ""),
+            "research_brain": research_brain,
+        },
+    )
+    findings: list[CustomerFinding] = []
+    if not actions:
+        findings.append(_browser_finding(
+            "research-brain-no-branch-actions",
+            "Research brain could not plan executable customer branches",
+            CustomerSeverity.high,
+            "The system did not move from observation into realistic customer behavior.",
+            "The run can still overclaim readiness because it has not tried enough product behavior.",
+            "Every product without explicit flow configuration.",
+            "Improve observation/action planning or provide seeded state and product flow hints.",
+            core=True,
+        ))
+    if actions and not changed_actions:
+        findings.append(_browser_finding(
+            "research-brain-no-observable-branch-change",
+            "Research brain actions produced no observable branch change",
+            CustomerSeverity.high,
+            "The product was clicked or filled but the researcher could not observe meaningful progress.",
+            "The customer loop may replay shallow actions without learning anything new.",
+            "Products with custom controls, auth walls, or stateful flows.",
+            "Treat unchanged branches as failed research and choose a different journey or provide seeded state.",
+            core=True,
+        ))
+    if failed_actions:
+        findings.append(_browser_finding(
+            "research-brain-action-failures",
+            "Some planned research actions failed at runtime",
+            CustomerSeverity.medium,
+            "The research brain attempted a branch but the browser/CDP primitive failed before producing strong evidence.",
+            "The run may miss reachable product behavior if action-level failures are not retried or bypassed.",
+            "Every flaky CDP, auth, custom-control, or long-running product branch.",
+            "Record the failed action, continue other branches, and retry with a more stable primitive or seeded state.",
+            core=True,
+        ))
+    if not filled_submit_actions:
+        findings.append(_browser_finding(
+            "research-brain-no-realistic-form-submit",
+            "No realistic filled form submission was executed",
+            CustomerSeverity.medium,
+            "The run did not behave like a user who supplies their own task data.",
+            "It may miss activation, validation, and output problems that appear only after real input.",
+            "Products whose first value requires forms, uploads, auth, or generated output.",
+            "Add form-planning, fixtures, seeded accounts, or product-specific input generation before claiming full coverage.",
+            core=True,
+        ))
+    if not research_brain.get("seeded_state_path"):
+        findings.append(_browser_finding(
+            "research-brain-no-seeded-state",
+            "No seeded account or state was available for authenticated depth",
+            CustomerSeverity.medium,
+            "The researcher can detect auth but cannot enter the app like a real customer with an account.",
+            "Coverage stays pre-auth for dashboards, records, settings, team flows, and saved state.",
+            "Every product whose value lives behind login or workspace state.",
+            "Provide a seeded account/state fixture plus cleanup policy so the researcher can test post-auth journeys.",
+            core=True,
+        ))
+    if screenshot_failures:
+        findings.append(_browser_finding(
+            "research-brain-screenshot-evidence-flaky",
+            "Screenshot evidence was incomplete for some research actions",
+            CustomerSeverity.medium,
+            "The run had to rely on URL/text evidence where visual before/after evidence should exist.",
+            "The system remains weaker than the customer-testing skill when screenshot capture is unstable.",
+            "Any visual/layout/trust judgment that depends on screenshots.",
+            "Harden the Windows screenshot primitive or retry/fallback capture before marking visual evidence complete.",
+        ))
+    return evidence, findings
+
+
+def _research_action_expr(action: dict) -> str:
+    payload = json.dumps(action)
+    return f"""(async () => {{
+      const action = {payload};
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const textOf = (el) => (el?.innerText || el?.textContent || "").replace(/\\s+/g, " ").trim();
+      const visible = (el) => Boolean(el && el.offsetParent !== null);
+      const forms = Array.from(document.querySelectorAll("form"));
+      const beforeUrl = location.href;
+      const beforeTitle = document.title || "";
+      const beforeTextSample = textOf(document.body).slice(0, 1400);
+      const sampleFor = (el) => {{
+        const type = String(el.getAttribute("type") || el.tagName || "").toLowerCase();
+        const label = [
+          el.getAttribute("name") || "",
+          el.getAttribute("placeholder") || "",
+          el.getAttribute("aria-label") || "",
+          el.id || "",
+        ].join(" ").toLowerCase();
+        if (type.includes("email") || label.includes("email")) return "customer.researcher@example.com";
+        if (type.includes("password") || label.includes("password")) return "CustomerTest123!";
+        if (label.includes("first")) return "Customer";
+        if (label.includes("last")) return "Researcher";
+        if (label.includes("team")) return "Customer Research Team";
+        if (type.includes("number")) return "42";
+        if (type.includes("checkbox") || type.includes("radio")) return true;
+        return "Customer research test input";
+      }};
+      const submit = async (form) => {{
+        const submitter = form.querySelector('button[type="submit"],input[type="submit"]')
+          || Array.from(form.querySelectorAll("button,input[type=button]"))
+            .find((el) => /submit|register|create|continue|save|log in|login|sign up/i.test(textOf(el) || el.value || ""));
+        if (!submitter) return {{ ok: false, summary: "form submit control not found" }};
+        submitter.click();
+        await wait(900);
+        return {{ ok: true, summary: `submitted form with ${{textOf(submitter) || submitter.value || "submit"}}` }};
+      }};
+      if (action.kind === "empty_submit" || action.kind === "filled_submit") {{
+        const form = forms[action.form_index || 0];
+        if (!form) return {{ ok: false, beforeUrl, afterUrl: location.href, summary: `form not found: ${{action.form_index || 0}}` }};
+        if (action.kind === "filled_submit") {{
+          for (const el of Array.from(form.querySelectorAll("input,textarea,select"))) {{
+            const type = String(el.getAttribute("type") || "").toLowerCase();
+            if (type === "hidden" || type === "file" || el.disabled) continue;
+            const sample = sampleFor(el);
+            if (typeof sample === "boolean") {{
+              el.checked = sample;
+            }} else {{
+              el.focus();
+              el.value = sample;
+            }}
+            el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+            el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+          }}
+        }}
+        const submitted = await submit(form);
+        return {{
+          ...submitted,
+          beforeUrl,
+          afterUrl: location.href,
+          beforeTitle,
+          afterTitle: document.title || "",
+          beforeTextSample,
+          afterTextSample: textOf(document.body).slice(0, 1400),
+        }};
+      }}
+      if (action.kind === "click") {{
+        const inner = action.action || {{}};
+        const href = inner.href || "";
+        const text = (inner.text || "").toLowerCase();
+        const selector = inner.selector || "";
+        let target = null;
+        if (href) {{
+          target = Array.from(document.querySelectorAll("a[href]"))
+            .find((el) => visible(el) && el.href === href && (!text || textOf(el).toLowerCase().includes(text)));
+        }}
+        if (!target && selector && !["a", "button"].includes(selector)) target = document.querySelector(selector);
+        if (!target && text) {{
+          target = Array.from(document.querySelectorAll("button,[role=button],a[href],input[type=button],input[type=submit]"))
+            .find((el) => visible(el) && textOf(el).toLowerCase().includes(text));
+        }}
+        if (!target) return {{ ok: false, beforeUrl, afterUrl: location.href, summary: `click target not found: ${{inner.text || selector}}` }};
+        target.scrollIntoView({{ block: "center", inline: "center" }});
+        await wait(100);
+        target.click();
+        await wait(900);
+        return {{
+          ok: true,
+          beforeUrl,
+          afterUrl: location.href,
+          beforeTitle,
+          afterTitle: document.title || "",
+          beforeTextSample,
+          afterTextSample: textOf(document.body).slice(0, 1400),
+          summary: `clicked ${{textOf(target) || selector}}`,
+        }};
+      }}
+      return {{ ok: false, beforeUrl, afterUrl: location.href, summary: `unsupported research action: ${{action.kind}}` }};
+    }})()"""
+
+
+def _screen_action_click_expr(action: dict) -> str:
+    payload = json.dumps(_clean_screen_action(action))
+    return f"""(async () => {{
+      const action = {payload};
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const textOf = (el) => (el?.innerText || el?.textContent || "").replace(/\\s+/g, " ").trim();
+      const visible = (el) => Boolean(el && el.offsetParent !== null);
+      const selector = action.selector || "";
+      const text = (action.text || "").toLowerCase();
+      const href = action.href || "";
+      const beforeUrl = location.href;
+      const beforeTitle = document.title || "";
+      const beforeTextSample = textOf(document.body).slice(0, 1200);
+      let target = null;
+      if (href) {{
+        target = Array.from(document.querySelectorAll("a[href]"))
+          .find((el) => visible(el) && el.href === href && (!text || textOf(el).toLowerCase().includes(text)));
+      }}
+      if (!target && selector && !["a", "button"].includes(selector)) target = document.querySelector(selector);
+      if (!target && text) {{
+        target = Array.from(document.querySelectorAll("button,[role=button],a[href],input[type=button],input[type=submit]"))
+          .find((el) => visible(el) && textOf(el).toLowerCase().includes(text));
+      }}
+      if (!target) {{
+        return {{ ok: false, beforeUrl, afterUrl: location.href, summary: `action target not found: ${{action.text || action.selector}}` }};
+      }}
+      target.scrollIntoView({{ block: "center", inline: "center" }});
+      await wait(100);
+      target.click();
+      await wait(800);
+      return {{
+        ok: true,
+        beforeUrl,
+        afterUrl: location.href,
+        beforeTitle,
+        afterTitle: document.title || "",
+        beforeTextSample,
+        afterTextSample: textOf(document.body).slice(0, 1200),
+        summary: `clicked ${{textOf(target) || action.selector}}`,
+      }};
+    }})()"""
 
 
 def _flow_step_expr(step: CustomerFlowStep) -> str:
@@ -696,6 +1794,130 @@ _CUSTOMER_PROBE_JS = r"""(() => {
       hasErrorRecovery: /error|invalid|required|try again|retry|fix|failed|missing/.test(visibleText),
       hasCollaboration: /share|export|download|send|client|team|approve/.test(visibleText),
     },
+  };
+})()"""
+
+_SCREEN_ACTION_DISCOVERY_JS = r"""(() => {
+  const textOf = (el) => (el?.innerText || el?.textContent || "").replace(/\s+/g, " ").trim();
+  const selectorFor = (el) => {
+    if (!el) return "";
+    if (el.id) return `#${CSS.escape(el.id)}`;
+    const testId = el.getAttribute("data-testid") || el.getAttribute("data-test");
+    if (testId) return `[data-testid="${CSS.escape(testId)}"],[data-test="${CSS.escape(testId)}"]`;
+    const name = el.getAttribute("name");
+    if (name) return `${el.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`;
+    const href = el.getAttribute("href");
+    if (href) return `${el.tagName.toLowerCase()}[href="${CSS.escape(href)}"]`;
+    const type = el.getAttribute("type");
+    if (type) return `${el.tagName.toLowerCase()}[type="${CSS.escape(type)}"]`;
+    const aria = el.getAttribute("aria-label");
+    if (aria) return `${el.tagName.toLowerCase()}[aria-label="${CSS.escape(aria)}"]`;
+    return el.tagName.toLowerCase();
+  };
+  return Array.from(document.querySelectorAll("button,[role=button],a[href],input[type=button],input[type=submit]"))
+    .filter((el) => el.offsetParent !== null)
+    .slice(0, 80)
+    .map((el) => {
+      const rect = el.getBoundingClientRect();
+      const anchor = el.closest("a[href]");
+      return {
+        text: textOf(el) || el.getAttribute("aria-label") || el.getAttribute("value") || el.getAttribute("title") || "",
+        selector: selectorFor(el),
+        href: el.href || anchor?.href || "",
+        tag: el.tagName.toLowerCase(),
+        role: el.getAttribute("role") || "",
+        disabled: Boolean(el.disabled || el.getAttribute("aria-disabled") === "true"),
+        inMain: Boolean(el.closest("main,[role=main]")),
+        inHeader: Boolean(el.closest("header,[role=banner]")),
+        inNav: Boolean(el.closest("nav,[role=navigation]")),
+        inFooter: Boolean(el.closest("footer,[role=contentinfo]")),
+        top: Math.round(rect.top),
+        left: Math.round(rect.left),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      };
+    })
+    .filter((item) => item.text || item.href || item.selector);
+})()"""
+
+_RESEARCH_OBSERVE_JS = r"""(() => {
+  const textOf = (el) => (el?.innerText || el?.textContent || "").replace(/\s+/g, " ").trim();
+  const selectorFor = (el) => {
+    if (!el) return "";
+    if (el.id) return `#${CSS.escape(el.id)}`;
+    const testId = el.getAttribute("data-testid") || el.getAttribute("data-test");
+    if (testId) return `[data-testid="${CSS.escape(testId)}"],[data-test="${CSS.escape(testId)}"]`;
+    const name = el.getAttribute("name");
+    if (name) return `${el.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`;
+    const href = el.getAttribute("href");
+    if (href) return `${el.tagName.toLowerCase()}[href="${CSS.escape(href)}"]`;
+    const type = el.getAttribute("type");
+    if (type) return `${el.tagName.toLowerCase()}[type="${CSS.escape(type)}"]`;
+    const aria = el.getAttribute("aria-label");
+    if (aria) return `${el.tagName.toLowerCase()}[aria-label="${CSS.escape(aria)}"]`;
+    return el.tagName.toLowerCase();
+  };
+  const controls = Array.from(document.querySelectorAll("button,[role=button],a[href],input[type=button],input[type=submit]"))
+    .filter((el) => el.offsetParent !== null)
+    .slice(0, 80)
+    .map((el) => {
+      const rect = el.getBoundingClientRect();
+      const anchor = el.closest("a[href]");
+      return {
+        text: textOf(el) || el.getAttribute("aria-label") || el.getAttribute("value") || el.getAttribute("title") || "",
+        selector: selectorFor(el),
+        href: el.href || anchor?.href || "",
+        tag: el.tagName.toLowerCase(),
+        role: el.getAttribute("role") || "",
+        disabled: Boolean(el.disabled || el.getAttribute("aria-disabled") === "true"),
+        inMain: Boolean(el.closest("main,[role=main]")),
+        inHeader: Boolean(el.closest("header,[role=banner]")),
+        inNav: Boolean(el.closest("nav,[role=navigation]")),
+        inFooter: Boolean(el.closest("footer,[role=contentinfo]")),
+        top: Math.round(rect.top),
+        left: Math.round(rect.left),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      };
+    })
+    .filter((item) => item.text || item.href || item.selector);
+  const forms = Array.from(document.querySelectorAll("form")).slice(0, 8).map((form, index) => {
+    const submitter = form.querySelector('button[type="submit"],input[type="submit"]')
+      || Array.from(form.querySelectorAll("button,input[type=button]"))
+        .find((el) => /submit|register|create|continue|save|log in|login|sign up/i.test(textOf(el) || el.value || ""));
+    const inputs = Array.from(form.querySelectorAll("input,textarea,select")).slice(0, 16).map((el) => ({
+      selector: selectorFor(el),
+      tag: el.tagName.toLowerCase(),
+      type: el.getAttribute("type") || el.tagName.toLowerCase(),
+      name: el.getAttribute("name") || "",
+      placeholder: el.getAttribute("placeholder") || "",
+      aria: el.getAttribute("aria-label") || "",
+      required: Boolean(el.required || el.getAttribute("aria-required") === "true"),
+      disabled: Boolean(el.disabled),
+    }));
+    return {
+      index,
+      text: textOf(form).slice(0, 1000),
+      inputCount: inputs.length,
+      requiredCount: inputs.filter((input) => input.required).length,
+      inputs,
+      submitSelector: submitter ? selectorFor(submitter) : "",
+      submitText: submitter ? (textOf(submitter) || submitter.getAttribute("value") || "") : "",
+    };
+  });
+  const bodyText = textOf(document.body);
+  const headings = Array.from(document.querySelectorAll("h1,h2,h3")).slice(0, 20).map(textOf).filter(Boolean);
+  return {
+    url: location.href,
+    title: document.title || "",
+    headings,
+    bodyTextSample: bodyText.slice(0, 3000),
+    forms,
+    actions: controls,
+    focusableCount: document.querySelectorAll("a[href],button,input,textarea,select,[tabindex]").length,
+    hasAuthText: /login|log in|register|sign up|password|email address/i.test(bodyText),
+    hasDashboardText: /dashboard|settings|profile|users|team|discussion|project/i.test(bodyText),
+    hasTrustText: /privacy|security|permission|data|terms|policy/i.test(bodyText),
   };
 })()"""
 

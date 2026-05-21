@@ -28,6 +28,8 @@ from teamnot.customer_loop.runners import (
     OpenClawWindowsCDPRunner,
     OpenClawWindowsFlowRunner,
     OpenClawWindowsInteractiveRunner,
+    OpenClawWindowsResearcherRunner,
+    OpenClawWindowsSessionRunner,
 )
 
 RunTeamNoT = Callable[[Path], None]
@@ -56,6 +58,7 @@ class CustomerLoopOrchestrator:
         stopped_reason = "no finding met severity threshold"
         iteration_out_dirs: list[Path] = []
         iterations_completed = 0
+        last_invoked_finding_id: str | None = None
 
         for iteration in range(1, config.max_iterations + 1):
             iteration_dir = _iteration_dir(out_dir, iteration, config.max_iterations)
@@ -68,6 +71,9 @@ class CustomerLoopOrchestrator:
             if not selected:
                 stopped_reason = "no finding met severity threshold"
                 break
+            if config.run_teamnot and last_invoked_finding_id == selected.id:
+                stopped_reason = f"repeated finding after TeamNoT run: {selected.id}"
+                break
             previous = load_brief(config.previous_brief_path) if config.previous_brief_path else None
             generated = generate_followup_brief(report, selected, iteration_dir, previous)
             brief_path = write_generated_brief(iteration_dir, generated)
@@ -75,8 +81,14 @@ class CustomerLoopOrchestrator:
             if not config.run_teamnot:
                 break
             if self.run_teamnot_hook:
-                self.run_teamnot_hook(brief_path)
+                try:
+                    self.run_teamnot_hook(brief_path)
+                except Exception as exc:
+                    teamnot_invoked = True
+                    stopped_reason = f"TeamNoT invocation failed: {exc}"
+                    break
             teamnot_invoked = True
+            last_invoked_finding_id = selected.id
             stopped_reason = "generated follow-up brief and invoked TeamNoT"
         else:
             stopped_reason = "max iterations reached"
@@ -112,6 +124,13 @@ class CustomerLoopOrchestrator:
             return OpenClawWindowsFlowRunner(load_model(config.flow_path, CustomerFlowPack))
         if config.runner == CustomerLoopRunnerName.openclaw_windows_interactive:
             return OpenClawWindowsInteractiveRunner()
+        if config.runner == CustomerLoopRunnerName.openclaw_windows_session:
+            return OpenClawWindowsSessionRunner(file_fixture_path=config.file_fixture_path)
+        if config.runner == CustomerLoopRunnerName.openclaw_windows_researcher:
+            return OpenClawWindowsResearcherRunner(
+                file_fixture_path=config.file_fixture_path,
+                seeded_state_path=config.seeded_state_path,
+            )
         return OpenClawWindowsCDPRunner()
 
 

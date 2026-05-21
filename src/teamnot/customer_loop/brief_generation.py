@@ -17,6 +17,7 @@ def generate_followup_brief(
 ) -> GeneratedBrief:
     project_path = previous_brief.project.path if previous_brief else Path.cwd()
     project_name = previous_brief.project.name if previous_brief else project_path.name
+    dod = _followup_dod(out_dir, previous_brief)
     finding_suffix = re.sub(r"[^A-Za-z0-9-]+", "-", finding.id).strip("-").upper() or "FINDING"
     task_id = f"CUSTOMER-LOOP-{finding_suffix}"
     description = f"""Customer Loop selected this as the next highest-impact move.
@@ -66,22 +67,11 @@ Evidence:
                 ],
             },
             "references": [
-                str(out_dir / "customer_report.md"),
-                str(out_dir / "customer_report.json"),
+                str((out_dir / "customer_report.md").resolve()),
+                str((out_dir / "customer_report.json").resolve()),
             ],
         },
-        "definition_of_done": {
-            "checks": [
-                {"name": "tests pass", "run": "pytest -q"},
-                {"name": "lint passes", "run": "ruff check ."},
-                {
-                    "name": "customer report reference exists",
-                    "file_exists": str(out_dir / "customer_report.json"),
-                    "required": False,
-                },
-            ],
-            "llm_judge_required": False,
-        },
+        "definition_of_done": dod,
         "deliverable": {
             "type": "feature_branch",
             "branch": f"feature/{task_id.lower()}",
@@ -118,3 +108,40 @@ def _evidence_refs(finding: CustomerFinding) -> str:
             refs.append(f"- {item.path}")
         refs.extend(f"- screenshot: {path}" for path in item.screenshot_paths)
     return "\n".join(refs) if refs else "- See customer_report.json"
+
+
+def _followup_dod(out_dir: Path, previous_brief: Brief | None) -> dict[str, Any]:
+    if previous_brief:
+        dod = previous_brief.definition_of_done.model_dump(mode="json")
+        checks = list(dod.get("checks") or [])
+    else:
+        dod = {"require_all_pass": True, "llm_judge_required": False}
+        checks = [
+            {"name": "tests pass", "run": "pytest -q"},
+            {"name": "lint passes", "run": "ruff check ."},
+        ]
+    checks.append({
+        "name": "customer report reference exists",
+        "file_exists": str((out_dir / "customer_report.json").resolve()),
+        "required": False,
+    })
+    checks.append({
+        "name": "source change exists outside TeamNoT artifacts",
+        "run": _source_change_check_command(),
+        "expect_exit": 0,
+        "timeout_s": 30,
+    })
+    dod["checks"] = checks
+    dod["llm_judge_required"] = False
+    return dod
+
+
+def _source_change_check_command() -> str:
+    return (
+        "python3 -c "
+        "\"import subprocess, sys; "
+        "out=subprocess.run(['git','status','--short'],capture_output=True,text=True,check=False).stdout.splitlines(); "
+        "changes=[line for line in out if len(line)>3 and not line[3:].startswith('.teamnot/')]; "
+        "print('\\n'.join(changes)); "
+        "sys.exit(0 if changes else 1)\""
+    )

@@ -34,6 +34,8 @@ class CustomerLoopRunnerName(str, Enum):
     openclaw_windows_cdp = "openclaw-windows-cdp"
     openclaw_windows_interactive = "openclaw-windows-interactive"
     openclaw_windows_flow = "openclaw-windows-flow"
+    openclaw_windows_session = "openclaw-windows-session"
+    openclaw_windows_researcher = "openclaw-windows-researcher"
 
 
 class CustomerProfile(BaseModel):
@@ -218,6 +220,8 @@ class CustomerLoopConfig(BaseModel):
     evidence_path: Path | None = None
     previous_brief_path: Path | None = None
     flow_path: Path | None = None
+    file_fixture_path: Path | None = None
+    seeded_state_path: Path | None = None
 
 
 class CustomerLoopResult(BaseModel):
