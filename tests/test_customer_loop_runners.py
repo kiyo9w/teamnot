@@ -439,6 +439,7 @@ def test_openclaw_flow_runner_executes_configured_customer_steps(tmp_path: Path)
     )
 
     assert report.evidence[1].kind == "browser_flow"
+    assert "STEP_PASS|primary-workflow|configured customer flow runner" in report.evidence[0].raw_excerpt
     assert "STEP_PASS|flow-upload-csv-and-render-report-upload-csv" in report.evidence[1].raw_excerpt
     assert "STEP_PASS|flow-upload-csv-and-render-report-see-blockers" in report.evidence[1].raw_excerpt
     assert len(report.evidence[1].screenshot_paths) == 3
@@ -547,6 +548,7 @@ def test_openclaw_flow_runner_executes_multi_screen_non_upload_flow_pack(tmp_pat
     )
 
     assert report.evidence[1].kind == "browser_flow"
+    assert "STEP_PASS|primary-workflow|configured customer flow runner" in report.evidence[0].raw_excerpt
     assert "SaaS operator journeys" in report.evidence[1].observed_behavior
     assert "STEP_PASS|flow-create-project-open-new-project" in report.evidence[1].raw_excerpt
     assert "STEP_PASS|flow-invite-teammate-invite-confirmed" in report.evidence[1].raw_excerpt
