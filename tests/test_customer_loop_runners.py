@@ -100,7 +100,34 @@ def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):
                 stdout='{"ok": true, "url": "https://example-product.test", "title": "Mock Product"}',
                 stderr="",
             )
+        if action == "viewport":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"ok": true, "viewport": {"width": 390, "height": 844}}',
+                stderr="",
+            )
         if action == "eval":
+            if any(
+                cmd[2] == "viewport"
+                and "--width" in cmd
+                and cmd[cmd.index("--width") + 1] == "390"
+                for cmd in commands if len(cmd) > 2
+            ):
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=(
+                        '{"ok": true, "result": {'
+                        '"url": "https://example-product.test",'
+                        '"viewport": {"width": 390, "height": 844},'
+                        '"hasHorizontalOverflow": false,'
+                        '"bodyTextLength": 300,'
+                        '"firstActions": ["Run test"]'
+                        "}}"
+                    ),
+                    stderr="",
+                )
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -139,8 +166,9 @@ def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):
     assert [cmd[1:3] for cmd in commands[:3]] == [
         ["--action", "status"],
         ["--action", "navigate"],
-        ["--action", "screenshot"],
+        ["--action", "viewport"],
     ]
+    assert any(cmd[1:3] == ["--action", "screenshot"] for cmd in commands)
     assert report.evidence[0].kind == "browser_observation"
     assert "first-impression" in report.evidence[0].raw_excerpt
     assert report.findings == []

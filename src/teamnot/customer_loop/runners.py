@@ -97,14 +97,20 @@ class OpenClawWindowsCDPRunner:
         mobile_review_out = _path_for_windows_wrapper(mobile_review)
         self._run(["--action", "status"])
         navigate = _parse_json_stdout(self._run(["--action", "navigate", "--url", str(target.url)]))
+        self._try_run(["--action", "viewport", "--width", "1280", "--height", "900"])
         self._run(["--action", "screenshot", "--out", first_impression_out])
         self._run(["--action", "screenshot", "--out", full_page_out, "--full-page"])
         probe = _parse_json_stdout(self._run(["--action", "eval", "--expr", _CUSTOMER_PROBE_JS]))
         result = probe.get("result", probe)
+        mobile_viewport = self._try_run(["--action", "viewport", "--width", "390", "--height", "844"])
         mobile_probe = _parse_json_stdout(self._run(["--action", "eval", "--expr", _MOBILE_PROBE_JS])).get("result", {})
         self._run(["--action", "screenshot", "--out", mobile_review_out])
         if isinstance(mobile_probe, dict):
             result["mobileProbe"] = mobile_probe
+            result["mobileViewport"] = _parse_json_stdout(mobile_viewport) if mobile_viewport else {
+                "ok": False,
+                "reason": "scripts/winbrowser did not support viewport action",
+            }
         markers, findings = _build_customer_findings(result, target, profile, plan)
         scores = _score_customer_readiness(result, findings)
         evidence = CustomerEvidence(
@@ -156,6 +162,19 @@ class OpenClawWindowsCDPRunner:
             raise CustomerLoopRunnerError(
                 f"OpenClaw wrapper failed: {' '.join(command)}\n{result.stderr.strip()}"
             )
+        return result
+
+    def _try_run(self, args: list[str]) -> subprocess.CompletedProcess[str] | None:
+        command = [str(self.wrapper_path), *args]
+        try:
+            result = self.command_runner(command)
+        except subprocess.TimeoutExpired:
+            return None
+        if result.returncode != 0:
+            return None
+        parsed = _parse_json_stdout(result)
+        if parsed.get("ok") is False:
+            return None
         return result
 
     @staticmethod
@@ -297,7 +316,6 @@ _CUSTOMER_PROBE_JS = r"""(() => {
 })()"""
 
 _MOBILE_PROBE_JS = r"""(() => {
-  try { window.resizeTo(390, 844); } catch {}
   const textOf = (el) => (el?.innerText || el?.textContent || "").replace(/\s+/g, " ").trim();
   const overflow = document.documentElement.scrollWidth > innerWidth + 2;
   return {
@@ -526,7 +544,23 @@ def _build_customer_findings(
     else:
         markers.append("STEP_PASS|layout-overflow|no horizontal overflow detected")
 
-    if mobile_probe.get("hasHorizontalOverflow"):
+    mobile_viewport = probe.get("mobileViewport", {}) if isinstance(probe.get("mobileViewport"), dict) else {}
+    mobile_width = (mobile_probe.get("viewport") or {}).get("width") if isinstance(mobile_probe.get("viewport"), dict) else None
+    if mobile_viewport.get("ok") is False or (isinstance(mobile_width, int) and mobile_width > 500):
+        markers.append(
+            "STEP_SKIP|mobile-review|"
+            "mobile viewport could not be set through scripts/winbrowser; screenshot is desktop-sized"
+        )
+        findings.append(_browser_finding(
+            "mobile-review-not-executed",
+            "Mobile review could not run at a phone-width viewport",
+            CustomerSeverity.low,
+            "The test does not prove the product can be reviewed on a phone.",
+            "Customer Loop evidence is weaker for mobile approval or stakeholder review.",
+            "Every run on wrappers without viewport support.",
+            "Use a browser wrapper that supports viewport resizing before claiming mobile coverage.",
+        ))
+    elif mobile_probe.get("hasHorizontalOverflow"):
         markers.append("STEP_FAIL|mobile-review|mobile/narrow viewport has horizontal overflow")
         findings.append(_browser_finding(
             "mobile-review-overflow",
