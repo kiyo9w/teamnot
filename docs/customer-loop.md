@@ -93,8 +93,6 @@ Inspect a running product and generate a richer starter from real DOM controls:
 teamnot customer-flow-inspect \
   --target https://example-product.test \
   --profile .teamnot/customer-loop/customer.yaml \
-  --route / \
-  --route /app/projects \
   --out .teamnot/customer-loop/customer_flow.yaml
 ```
 
@@ -102,7 +100,11 @@ This optional OpenClaw adapter uses `scripts/winbrowser` to navigate each route,
 read visible buttons, links, forms, labels, and customer-facing trust/recovery
 copy, then writes a flow pack with concrete selectors and action text where the
 browser can infer them. It still leaves TODOs where only product intent can
-decide the right customer input or success criterion.
+decide the right customer input or success criterion. If no `--route` is
+provided, TeamNoT first explores visible internal links/actions from the target
+page, prioritizes main-content product/workflow routes over nav/footer links,
+and inspects the highest-value routes. Pass explicit `--route` values when a
+private app needs a known dashboard, settings, billing, or record screen.
 
 Run a full inspected customer session:
 
@@ -110,14 +112,13 @@ Run a full inspected customer session:
 teamnot customer-flow-session \
   --target https://example-product.test \
   --profile .teamnot/customer-loop/customer.yaml \
-  --route / \
-  --route /app/projects \
   --out .teamnot/customer-loop/session-001
 ```
 
 This performs the productized loop for flow discovery: inspect the browser DOM,
-write `inspected_flow.yaml`, convert unresolved TODO/external-risky actions into
-a safer `runnable_flow.yaml`, execute that flow with screenshots, write the
+auto-discover route candidates when routes are not supplied, write
+`inspected_flow.yaml`, convert unresolved TODO/external-risky actions into a
+safer `runnable_flow.yaml`, execute that flow with screenshots, write the
 customer report, and emit `flow_refinement_report.md`. External downloads,
 installers, login, checkout, claim-offer, and account actions are verified as
 visible links/text unless a human-approved flow explicitly models the click.

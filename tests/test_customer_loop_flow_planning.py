@@ -10,6 +10,7 @@ from teamnot.cli.__main__ import main
 from teamnot.customer_loop import (
     CustomerProfile,
     ExperienceTarget,
+    discover_customer_routes,
     flow_pack_gaps,
     inspect_customer_flow_pack,
     make_flow_pack_runnable,
@@ -296,6 +297,140 @@ def test_inspected_flow_prioritizes_main_product_cta_over_footer_links(tmp_path:
     core = flow_pack.flows[0]
     assert any(step.action == "click_text" and step.text == "Explore Codex for work" for step in core.steps)
     assert all(step.text != "Explore ChatGPT" for step in core.steps if step.action == "click_text")
+
+
+def test_discover_customer_routes_prioritizes_main_workflow_routes(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def command_runner(command):
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+        if action == "eval":
+            result = [
+                {"text": "Careers", "href": "https://example-product.test/careers/", "inFooter": True},
+                {"text": "Example Home", "href": "https://example-product.test/", "inHeader": True},
+                {"text": "Create project", "href": "https://example-product.test/app/projects", "inMain": True},
+                {"text": "Invite team", "href": "https://example-product.test/settings/team", "inMain": True},
+                {"text": "Privacy Policy", "href": "https://example-product.test/policies/privacy-policy", "inFooter": True},
+                {"text": "External docs", "href": "https://docs.example.test/", "inMain": True},
+            ]
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"ok": True, "result": result}),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    routes = discover_customer_routes(
+        ExperienceTarget(url="https://example-product.test/product"),
+        CustomerProfile(
+            persona="Workspace admin",
+            role="admin",
+            current_workflow="create projects and invite team members",
+        ),
+        max_routes=3,
+        wrapper_path=wrapper,
+        command_runner=command_runner,
+    )
+
+    assert routes[0] == "/product"
+    assert set(routes[1:]) == {"/app/projects", "/settings/team"}
+    assert "/" not in routes
+
+
+def test_inspect_customer_flow_pack_discovers_routes_when_unseeded(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    inspected_routes: list[str] = []
+
+    def command_runner(command):
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            inspected_routes.append(command[command.index("--url") + 1])
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+        if action == "eval":
+            expr = command[-1]
+            if "a[href],button,[role=button]" in expr:
+                result = [
+                    {"text": "Create project", "href": "https://example-product.test/app/projects", "inMain": True},
+                ]
+            else:
+                result = {
+                    "mainSelector": "main",
+                    "actions": [{"text": "Create project", "selector": "button", "tag": "button", "inMain": True}],
+                    "inputs": [],
+                    "resultCues": [],
+                    "recoveryCues": [],
+                    "trustCues": [],
+                    "adoptionCues": [],
+                }
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"ok": True, "result": result}),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    flow_pack = inspect_customer_flow_pack(
+        ExperienceTarget(url="https://example-product.test/product"),
+        CustomerProfile(persona="Workspace admin", role="admin"),
+        None,
+        wrapper_path=wrapper,
+        command_runner=command_runner,
+    )
+
+    assert [flow.start_url for flow in flow_pack.flows[:2]] == ["/product", "/app/projects"]
+    assert "https://example-product.test/app/projects" in inspected_routes
+
+
+def test_trust_flow_starts_on_route_that_contains_inferred_trust_cue(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    current_url = ""
+
+    def command_runner(command):
+        nonlocal current_url
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            current_url = command[command.index("--url") + 1]
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+        if action == "eval":
+            result = {
+                "mainSelector": "main",
+                "actions": [{"text": "Start", "selector": "button", "tag": "button", "inMain": True}],
+                "inputs": [],
+                "resultCues": [],
+                "recoveryCues": [],
+                "trustCues": ["SOC2 proof is available."] if "/security" in current_url else [],
+                "adoptionCues": ["Contact support for onboarding."] if "/security" not in current_url else [],
+            }
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"ok": True, "result": result}),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    flow_pack = inspect_customer_flow_pack(
+        ExperienceTarget(url="https://example-product.test"),
+        CustomerProfile(persona="Security lead", role="buyer"),
+        ["/", "/security"],
+        wrapper_path=wrapper,
+        command_runner=command_runner,
+    )
+
+    trust_flow = flow_pack.flows[-1]
+    assert trust_flow.start_url == "/security"
+    assert trust_flow.steps[0].text == "SOC2 proof is available."
+    assert trust_flow.steps[1].action == "checkpoint"
 
 
 def test_make_flow_pack_runnable_converts_todos_to_checkpoints():

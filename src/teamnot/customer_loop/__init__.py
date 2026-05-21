@@ -9,6 +9,7 @@ from teamnot.customer_loop.artifacts import (
 )
 from teamnot.customer_loop.brief_generation import generate_followup_brief
 from teamnot.customer_loop.flow_planning import (
+    discover_customer_routes,
     flow_pack_gaps,
     inspect_customer_flow_pack,
     make_flow_pack_runnable,
@@ -79,6 +80,7 @@ __all__ = [
     "OpenClawWindowsFlowRunner",
     "OpenClawWindowsInteractiveRunner",
     "default_customer_test_plan",
+    "discover_customer_routes",
     "ensure_artifact_dirs",
     "generate_followup_brief",
     "flow_pack_gaps",

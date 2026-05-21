@@ -47,7 +47,12 @@ def inspect_customer_flow_pack(
     if not wrapper.exists():
         raise FileNotFoundError(f"Browser wrapper not found: {wrapper}")
     runner = command_runner or _default_runner
-    planned_routes = routes or ["/"]
+    planned_routes = routes or discover_customer_routes(
+        target,
+        profile,
+        wrapper_path=wrapper,
+        command_runner=runner,
+    )
     pages = [_inspect_route(wrapper, runner, target, route) for route in planned_routes]
     flows = [_flow_from_page(page, profile, primary=index == 0) for index, page in enumerate(pages)]
     flows.append(_inspected_error_recovery_flow(pages[0]))
@@ -57,6 +62,41 @@ def inspect_customer_flow_pack(
         reset_between_flows=True,
         flows=flows,
     )
+
+
+def discover_customer_routes(
+    target: ExperienceTarget,
+    profile: CustomerProfile,
+    max_routes: int = 5,
+    wrapper_path: str | Path = "scripts/winbrowser",
+    command_runner: CommandRunner | None = None,
+) -> list[str]:
+    wrapper = _resolve_wrapper_path(wrapper_path)
+    if not wrapper.exists():
+        raise FileNotFoundError(f"Browser wrapper not found: {wrapper}")
+    runner = command_runner or _default_runner
+    base_route = _target_route(target)
+    _parse_json(_run(runner, [str(wrapper), "--action", "navigate", "--url", str(target.url)]))
+    discovered = _parse_json(_run(runner, [str(wrapper), "--action", "eval", "--expr", _ROUTE_DISCOVERY_JS]))
+    candidates = discovered.get("result", discovered)
+    if not isinstance(candidates, list):
+        candidates = []
+    ranked = sorted(
+        [candidate for candidate in candidates if isinstance(candidate, dict)],
+        key=lambda candidate: _route_candidate_rank(candidate, profile, target),
+        reverse=True,
+    )
+    routes = [base_route]
+    for candidate in ranked:
+        route = _route_from_href(str(candidate.get("href", "")), target)
+        if route == "/" and base_route != "/":
+            continue
+        if not route or route in routes:
+            continue
+        routes.append(route)
+        if len(routes) >= max_routes:
+            break
+    return routes
 
 
 def make_flow_pack_runnable(flow_pack: CustomerFlowPack) -> CustomerFlowPack:
@@ -282,6 +322,24 @@ def _route_name(route: str) -> str:
     return cleaned.title() if cleaned else "Home"
 
 
+def _target_route(target: ExperienceTarget) -> str:
+    parsed = urlparse(str(target.url))
+    return parsed.path or "/"
+
+
+def _route_from_href(href: str, target: ExperienceTarget) -> str:
+    if not href:
+        return ""
+    parsed_target = urlparse(str(target.url))
+    parsed = urlparse(href)
+    if parsed.scheme and parsed.netloc and parsed.netloc != parsed_target.netloc:
+        return ""
+    path = parsed.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    return path
+
+
 def _flow_from_page(page: dict, profile: CustomerProfile, primary: bool) -> CustomerFlow:
     action = _best_action(page.get("actions", []))
     input_control = _first([control for control in page.get("inputs", []) if _input_is_customer_workflow(control)])
@@ -368,8 +426,9 @@ def _inspected_error_recovery_flow(page: dict) -> CustomerFlow:
 
 
 def _inspected_trust_and_adoption_flow(pages: list[dict], profile: CustomerProfile) -> CustomerFlow:
-    trust_cue = _best_cue(cue for page in pages for cue in page.get("trustCues", []))
-    adoption_cue = _best_cue(cue for page in pages for cue in page.get("adoptionCues", []))
+    trust_route, trust_cue = _best_routed_cue(pages, "trustCues")
+    adoption_route, adoption_cue = _best_routed_cue(pages, "adoptionCues")
+    start_url = trust_route or adoption_route or (pages[0].get("route", "/") if pages else "/")
     trust_step = (
         CustomerFlowStep(
             id="trust-cue-visible",
@@ -394,16 +453,21 @@ def _inspected_trust_and_adoption_flow(pages: list[dict], profile: CustomerProfi
             text=adoption_cue,
             description="Confirm the customer has a clear next step after evaluation.",
         )
-        if adoption_cue
+        if adoption_cue and adoption_route == start_url
         else CustomerFlowStep(
             id="support-or-next-step-visible",
             action="checkpoint",
-            description="No concrete support, pricing, pilot, docs, or onboarding cue was inferred from the page.",
+            description=(
+                f"Concrete adoption cue was found on `{adoption_route}`, not `{start_url}`; "
+                "model a separate adoption flow if this route matters."
+                if adoption_cue and adoption_route
+                else "No concrete support, pricing, pilot, docs, or onboarding cue was inferred from the page."
+            ),
         )
     )
     return CustomerFlow(
         name="Trust and adoption journey",
-        start_url=pages[0].get("route", "/") if pages else "/",
+        start_url=start_url,
         steps=[trust_step, adoption_step],
     )
 
@@ -536,6 +600,30 @@ def _input_is_customer_workflow(input_control: dict) -> bool:
     return True
 
 
+def _domain_terms_from_profile(profile: CustomerProfile, target: ExperienceTarget) -> list[str]:
+    sources = [
+        profile.persona,
+        profile.role,
+        profile.domain_literacy,
+        profile.current_workflow,
+        profile.buying_trigger,
+        profile.buyer_user_split,
+        profile.trust_threshold,
+        target.context,
+        *(profile.alternatives or []),
+    ]
+    stop = {
+        "the", "and", "for", "with", "that", "this", "from", "their", "your",
+        "user", "customer", "buyer", "product", "needs", "clear", "real",
+    }
+    terms: list[str] = []
+    for source in sources:
+        for raw in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", str(source).lower()):
+            if raw not in stop and raw not in terms:
+                terms.append(raw)
+    return terms[:16]
+
+
 def _best_action(actions: list[dict]) -> dict | None:
     ranked = sorted(actions, key=_action_rank, reverse=True)
     return ranked[0] if ranked else None
@@ -566,6 +654,32 @@ def _action_rank(action: dict) -> tuple[int, int, int]:
     return primary_score + nav_penalty + page_region_score, button_score, len(text)
 
 
+def _route_candidate_rank(candidate: dict, profile: CustomerProfile, target: ExperienceTarget) -> tuple[int, int, int, int]:
+    text = str(candidate.get("text", "")).lower()
+    href = str(candidate.get("href", "")).lower()
+    path = _route_from_href(str(candidate.get("href", "")), target).lower()
+    combined = f"{text} {href} {path}"
+    profile_terms = _domain_terms_from_profile(profile, target)
+    product_terms = (
+        "app", "dashboard", "project", "workspace", "settings", "team", "invite",
+        "docs", "pricing", "security", "privacy", "support", "demo", "trial",
+        "start", "try", "work", "download", "install", "onboarding",
+    )
+    low_value_terms = (
+        "terms", "privacy-policy", "cookie", "rss", "careers", "brand", "news",
+        "podcast", "livestream", "foundation", "about",
+    )
+    semantic_score = sum(1 for term in [*profile_terms, *product_terms] if term in combined)
+    region_score = 3 if candidate.get("inMain") else 0
+    if candidate.get("inFooter"):
+        region_score -= 4
+    if candidate.get("inHeader") or candidate.get("inNav"):
+        region_score -= 1
+    low_value_penalty = -4 if any(term in combined for term in low_value_terms) else 0
+    depth = len([part for part in path.split("/") if part])
+    return semantic_score + region_score + low_value_penalty, -depth, len(text), -len(path)
+
+
 def _first(items) -> dict | str | None:
     for item in items:
         if item:
@@ -577,6 +691,14 @@ def _best_cue(items) -> str | None:
     cues = [str(item).strip() for item in items if str(item).strip()]
     useful = [cue for cue in cues if len(cue) <= 160]
     return useful[0] if useful else None
+
+
+def _best_routed_cue(pages: list[dict], key: str) -> tuple[str, str | None]:
+    for page in pages:
+        cue = _best_cue(page.get(key, []))
+        if cue:
+            return str(page.get("route", "/")), cue
+    return "", None
 
 
 def _run(runner: CommandRunner, command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -671,4 +793,25 @@ _FLOW_INSPECT_JS = r"""(() => {
     trustCues: pickCue(["privacy", "secure", "security", "data", "trust", "proof", "soc", "gdpr"]),
     adoptionCues: pickCue(["pricing", "support", "contact", "demo", "trial", "docs", "onboarding", "book"]),
   };
+})()"""
+
+_ROUTE_DISCOVERY_JS = r"""(() => {
+  const textOf = (el) => (el?.innerText || el?.textContent || "").replace(/\s+/g, " ").trim();
+  return Array.from(document.querySelectorAll("a[href],button,[role=button]"))
+    .filter((el) => el.offsetParent !== null)
+    .slice(0, 120)
+    .map((el) => {
+      const rect = el.getBoundingClientRect();
+      return {
+        text: textOf(el) || el.getAttribute("aria-label") || el.getAttribute("title") || "",
+        href: el.href || el.getAttribute("data-href") || "",
+        tag: el.tagName.toLowerCase(),
+        inMain: Boolean(el.closest("main,[role=main]")),
+        inHeader: Boolean(el.closest("header,[role=banner]")),
+        inNav: Boolean(el.closest("nav,[role=navigation]")),
+        inFooter: Boolean(el.closest("footer,[role=contentinfo]")),
+        top: Math.round(rect.top),
+      };
+    })
+    .filter((item) => item.href && item.text);
 })()"""
