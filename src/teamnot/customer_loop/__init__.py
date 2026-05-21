@@ -10,10 +10,12 @@ from teamnot.customer_loop.artifacts import (
 from teamnot.customer_loop.brief_generation import generate_followup_brief
 from teamnot.customer_loop.flow_planning import (
     discover_customer_routes,
+    explore_product,
     flow_pack_gaps,
     inspect_customer_flow_pack,
     make_flow_pack_runnable,
     render_flow_refinement_report,
+    routes_from_exploration,
     suggest_customer_flow_pack,
 )
 from teamnot.customer_loop.io import load_model, load_yaml, save_json, save_yaml
@@ -38,6 +40,9 @@ from teamnot.customer_loop.models import (
     CustomerTestTask,
     ExperienceTarget,
     GeneratedBrief,
+    ProductExplorationPlan,
+    ProductJourney,
+    ProductRoute,
 )
 from teamnot.customer_loop.orchestrator import (
     CustomerLoopOrchestrator,
@@ -79,8 +84,12 @@ __all__ = [
     "OpenClawWindowsCDPRunner",
     "OpenClawWindowsFlowRunner",
     "OpenClawWindowsInteractiveRunner",
+    "ProductExplorationPlan",
+    "ProductJourney",
+    "ProductRoute",
     "default_customer_test_plan",
     "discover_customer_routes",
+    "explore_product",
     "ensure_artifact_dirs",
     "generate_followup_brief",
     "flow_pack_gaps",
@@ -90,6 +99,7 @@ __all__ = [
     "render_customer_report",
     "render_flow_refinement_report",
     "render_loop_summary",
+    "routes_from_exploration",
     "save_json",
     "save_yaml",
     "select_next_best_move",

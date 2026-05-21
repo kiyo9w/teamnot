@@ -14,6 +14,9 @@ from teamnot.customer_loop.models import (
     CustomerProfile,
     CustomerReport,
     ExperienceTarget,
+    ProductExplorationPlan,
+    ProductJourney,
+    ProductRoute,
 )
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
@@ -62,6 +65,59 @@ def inspect_customer_flow_pack(
         reset_between_flows=True,
         flows=flows,
     )
+
+
+def explore_product(
+    target: ExperienceTarget,
+    profile: CustomerProfile,
+    max_routes: int = 12,
+    wrapper_path: str | Path = "scripts/winbrowser",
+    command_runner: CommandRunner | None = None,
+) -> ProductExplorationPlan:
+    wrapper = _resolve_wrapper_path(wrapper_path)
+    if not wrapper.exists():
+        raise FileNotFoundError(f"Browser wrapper not found: {wrapper}")
+    runner = command_runner or _default_runner
+    base_route = _target_route(target)
+    _parse_json(_run(runner, [str(wrapper), "--action", "navigate", "--url", str(target.url)]))
+    discovered = _parse_json(_run(runner, [str(wrapper), "--action", "eval", "--expr", _ROUTE_DISCOVERY_JS]))
+    candidates = discovered.get("result", discovered)
+    if not isinstance(candidates, list):
+        candidates = []
+    routes = _select_exploration_routes(
+        target,
+        profile,
+        [candidate for candidate in candidates if isinstance(candidate, dict)],
+        base_route,
+        max_routes,
+    )
+    journeys = _build_exploration_journeys(routes, profile)
+    return ProductExplorationPlan(
+        target=target,
+        profile=profile,
+        routes=routes,
+        journeys=journeys,
+        personas=_exploration_personas(profile),
+        coverage_gaps=_exploration_gaps(routes, journeys, profile),
+        notes=(
+            "Autonomous product exploration planner. It maps visible routes and "
+            "prioritizes customer journeys before flow execution. Authenticated, "
+            "irreversible, stateful, and domain-correctness work is marked as a "
+            "coverage gap unless explicitly modeled by a project flow."
+        ),
+    )
+
+
+def routes_from_exploration(plan: ProductExplorationPlan, max_routes: int = 7) -> list[str]:
+    selected: list[str] = []
+    for route in sorted(plan.routes, key=lambda item: item.priority, reverse=True):
+        if route.requires_auth or route.coverage_status == "blocked":
+            continue
+        if route.route not in selected:
+            selected.append(route.route)
+        if len(selected) >= max_routes:
+            break
+    return selected or [_target_route(plan.target)]
 
 
 def discover_customer_routes(
@@ -680,6 +736,251 @@ def _route_candidate_rank(candidate: dict, profile: CustomerProfile, target: Exp
     low_value_penalty = -4 if any(term in combined for term in low_value_terms) else 0
     depth = len([part for part in path.split("/") if part])
     return semantic_score + region_score + low_value_penalty, -depth, len(text), -len(path)
+
+
+def _select_exploration_routes(
+    target: ExperienceTarget,
+    profile: CustomerProfile,
+    candidates: list[dict],
+    base_route: str,
+    max_routes: int,
+) -> list[ProductRoute]:
+    by_route: dict[str, ProductRoute] = {
+        base_route: ProductRoute(
+            route=base_route,
+            url=urljoin(str(target.url), base_route),
+            label="Entry route",
+            kind="landing",
+            priority=10,
+            reasons=["starting target"],
+        )
+    }
+    ranked = sorted(candidates, key=lambda candidate: _route_candidate_rank(candidate, profile, target), reverse=True)
+    for candidate in ranked:
+        route = _route_from_href(str(candidate.get("href", "")), target)
+        if not route:
+            continue
+        existing = by_route.get(route)
+        product_route = _product_route_from_candidate(target, profile, route, candidate)
+        if existing is None or product_route.priority > existing.priority:
+            by_route[route] = product_route
+    prioritized = sorted(by_route.values(), key=lambda item: (item.priority, -len(item.route)), reverse=True)
+    return prioritized[:max_routes]
+
+
+def _product_route_from_candidate(
+    target: ExperienceTarget,
+    profile: CustomerProfile,
+    route: str,
+    candidate: dict,
+) -> ProductRoute:
+    label = str(candidate.get("text", "")).strip() or route
+    combined = f"{label} {candidate.get('href', '')} {route}".lower()
+    kind = _route_kind(combined)
+    requires_auth = kind == "auth" or _contains_route_term(combined, ("login", "log-in", "signin", "sign-in", "account"))
+    reasons = _route_reasons(candidate, profile, combined, kind, requires_auth)
+    return ProductRoute(
+        route=route,
+        url=urljoin(str(target.url), route),
+        label=label,
+        kind=kind,
+        priority=_route_priority(candidate, profile, combined, kind, requires_auth),
+        reasons=reasons,
+        coverage_status="blocked" if requires_auth else "planned",
+        requires_auth=requires_auth,
+    )
+
+
+def _route_kind(combined: str) -> str:
+    categories = [
+        ("auth", ("login", "log in", "signin", "sign in", "sign-up", "signup", "account")),
+        ("pricing", ("pricing", "plans", "enterprise", "business")),
+        ("trust", ("security", "privacy", "trust", "safety", "soc", "gdpr", "compliance", "data")),
+        ("docs", ("docs", "documentation", "api", "developers", "install", "quickstart")),
+        ("support", ("support", "contact", "demo", "sales", "onboarding")),
+        ("dashboard", ("app", "dashboard", "workspace", "project", "settings", "team", "invite")),
+        ("workflow", ("start", "try", "create", "run", "generate", "upload", "import", "export")),
+        ("content", ("blog", "research", "news", "learn", "case-studies", "customers")),
+    ]
+    for kind, terms in categories:
+        if _contains_route_term(combined, terms):
+            return kind
+    return "general"
+
+
+def _route_priority(
+    candidate: dict,
+    profile: CustomerProfile,
+    combined: str,
+    kind: str,
+    requires_auth: bool,
+) -> int:
+    priority = {
+        "landing": 10,
+        "workflow": 9,
+        "dashboard": 8,
+        "docs": 7,
+        "trust": 7,
+        "pricing": 6,
+        "support": 6,
+        "auth": 5,
+        "content": 3,
+        "general": 4,
+    }.get(kind, 4)
+    if candidate.get("inMain"):
+        priority += 1
+    if candidate.get("inFooter"):
+        priority -= 2
+    if candidate.get("inHeader") or candidate.get("inNav"):
+        priority -= 1
+    profile_terms = _domain_terms_from_profile(profile, ExperienceTarget(url="https://example.test"))
+    if any(term in combined for term in profile_terms[:8]):
+        priority += 1
+    if requires_auth:
+        priority -= 1
+    return max(1, min(10, priority))
+
+
+def _route_reasons(
+    candidate: dict,
+    profile: CustomerProfile,
+    combined: str,
+    kind: str,
+    requires_auth: bool,
+) -> list[str]:
+    reasons = [f"classified as {kind}"]
+    if candidate.get("inMain"):
+        reasons.append("visible in main content")
+    if candidate.get("inFooter"):
+        reasons.append("footer link; lower confidence for core workflow")
+    profile_terms = _domain_terms_from_profile(profile, ExperienceTarget(url="https://example.test"))
+    matched = [term for term in profile_terms[:8] if term in combined]
+    if matched:
+        reasons.append(f"matches persona/workflow terms: {', '.join(matched[:3])}")
+    if requires_auth:
+        reasons.append("requires account/auth state before full testing")
+    return reasons
+
+
+def _build_exploration_journeys(routes: list[ProductRoute], profile: CustomerProfile) -> list[ProductJourney]:
+    journeys = [
+        _journey(
+            "first-value",
+            "First-value journey",
+            profile,
+            "Find the shortest path from landing page to a credible first value.",
+            _routes_for_kinds(routes, ("landing", "workflow", "dashboard", "docs")),
+            10,
+        ),
+        _journey(
+            "trust-adoption",
+            "Trust and adoption journey",
+            profile,
+            "Check whether the customer can satisfy risk, proof, pricing, support, and rollout questions.",
+            _routes_for_kinds(routes, ("trust", "pricing", "support", "docs")),
+            9,
+        ),
+        _journey(
+            "stateful-product",
+            "Stateful account/workspace journey",
+            profile,
+            "Exercise login, workspace, settings, team, billing, and saved state when a test account exists.",
+            _routes_for_kinds(routes, ("auth", "dashboard")),
+            8,
+        ),
+        _journey(
+            "domain-output-validation",
+            "Domain output validation journey",
+            profile,
+            "Judge whether the output is correct, useful, and believable for the domain workflow.",
+            _routes_for_kinds(routes, ("workflow", "dashboard", "docs")),
+            8,
+        ),
+        _journey(
+            "multi-persona-panel",
+            "Multi-persona objection panel",
+            profile,
+            "Compare daily-user, buyer, security/manager, and support concerns.",
+            _routes_for_kinds(routes, ("pricing", "trust", "support", "dashboard")),
+            7,
+        ),
+    ]
+    return [
+        journey for journey in journeys
+        if journey.routes or journey.id in {"stateful-product", "multi-persona-panel", "domain-output-validation"}
+    ]
+
+
+def _journey(
+    journey_id: str,
+    title: str,
+    profile: CustomerProfile,
+    goal: str,
+    routes: list[ProductRoute],
+    priority: int,
+) -> ProductJourney:
+    gaps: list[str] = []
+    if not routes:
+        gaps.append("No visible route was mapped for this journey.")
+    if any(route.requires_auth for route in routes):
+        gaps.append("Needs seeded account/auth state before claiming full coverage.")
+    if journey_id == "multi-persona-panel" and not profile.buyer_user_split:
+        gaps.append("No buyer/user split configured; add roles before running a panel.")
+    if journey_id == "domain-output-validation":
+        gaps.append("Needs domain oracle, fixture, or expected output to judge correctness deeply.")
+    if journey_id == "stateful-product" and not any(route.kind in {"auth", "dashboard"} for route in routes):
+        gaps.append("No account/workspace route was visible from the public entry point.")
+    status = "blocked" if any("Needs seeded account" in gap for gap in gaps) else ("partial" if gaps else "planned")
+    return ProductJourney(
+        id=journey_id,
+        title=title,
+        persona=profile.persona,
+        goal=goal,
+        routes=[route.route for route in routes],
+        priority=priority,
+        coverage_status=status,
+        gaps=gaps,
+    )
+
+
+def _routes_for_kinds(routes: list[ProductRoute], kinds: tuple[str, ...]) -> list[ProductRoute]:
+    selected = [route for route in routes if route.kind in kinds]
+    return sorted(selected, key=lambda route: route.priority, reverse=True)[:4]
+
+
+def _exploration_personas(profile: CustomerProfile) -> list[str]:
+    personas = [profile.persona]
+    if profile.buyer_user_split:
+        personas.extend(["daily user", "buyer/manager", "security/platform reviewer"])
+    elif profile.trust_threshold:
+        personas.append("risk reviewer")
+    return list(dict.fromkeys(personas))
+
+
+def _exploration_gaps(
+    routes: list[ProductRoute],
+    journeys: list[ProductJourney],
+    profile: CustomerProfile,
+) -> list[str]:
+    gaps: list[str] = []
+    kinds = {route.kind for route in routes}
+    if not kinds.intersection({"dashboard", "workflow"}):
+        gaps.append("No deep app/workflow route was discovered from the entry point.")
+    if "auth" in kinds:
+        gaps.append("Auth/account state is visible but requires a seeded test account for full coverage.")
+    if profile.buyer_user_split:
+        gaps.append("Run a multi-persona panel before claiming buyer/user fit.")
+    if profile.current_workflow or profile.alternatives:
+        gaps.append("Run JTBD/switching-forces validation before claiming replacement readiness.")
+    if any(journey.id == "domain-output-validation" for journey in journeys):
+        gaps.append("Add domain fixtures/oracles before claiming output correctness.")
+    if len(routes) >= 12:
+        gaps.append("Route map hit the max route cap; increase max_routes for large products.")
+    return _dedupe(gaps)
+
+
+def _contains_route_term(text: str, terms: tuple[str, ...]) -> bool:
+    return any(term in text for term in terms)
 
 
 def _first(items) -> dict | str | None:

@@ -117,6 +117,38 @@ class CustomerFlowPack(BaseModel):
         return data
 
 
+class ProductRoute(BaseModel):
+    route: str = Field(min_length=1)
+    url: str = ""
+    label: str = ""
+    kind: str = "general"
+    priority: int = Field(default=1, ge=1, le=10)
+    reasons: list[str] = Field(default_factory=list)
+    coverage_status: str = "planned"
+    requires_auth: bool = False
+
+
+class ProductJourney(BaseModel):
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    persona: str = ""
+    goal: str = ""
+    routes: list[str] = Field(default_factory=list)
+    priority: int = Field(default=1, ge=1, le=10)
+    coverage_status: str = "planned"
+    gaps: list[str] = Field(default_factory=list)
+
+
+class ProductExplorationPlan(BaseModel):
+    target: ExperienceTarget
+    profile: CustomerProfile
+    routes: list[ProductRoute] = Field(default_factory=list)
+    journeys: list[ProductJourney] = Field(default_factory=list)
+    personas: list[str] = Field(default_factory=list)
+    coverage_gaps: list[str] = Field(default_factory=list)
+    notes: str = ""
+
+
 class CustomerEvidence(BaseModel):
     kind: str = "manual_report"
     path: str = ""

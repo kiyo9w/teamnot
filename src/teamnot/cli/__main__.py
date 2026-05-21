@@ -59,10 +59,12 @@ from teamnot.customer_loop import (
     OpenClawWindowsFlowRunner,
     OpenClawWindowsInteractiveRunner,
     default_customer_test_plan,
+    explore_product,
     inspect_customer_flow_pack,
     load_model,
     make_flow_pack_runnable,
     render_flow_refinement_report,
+    routes_from_exploration,
     save_yaml,
     suggest_customer_flow_pack,
     write_report_artifacts,
@@ -447,6 +449,40 @@ def customer_flow_inspect(
     console.print(f"[green]Customer flow inspect written:[/green] {out_path}")
 
 
+@main.command("customer-explore", help="Map product routes, journeys, personas, and coverage gaps.")
+@click.option("--target", required=True, help="Target product URL.")
+@click.option("--profile", "profile_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              required=True, help="Customer profile YAML.")
+@click.option("--out", "out_path", type=click.Path(dir_okay=False, path_type=Path),
+              required=True, help="Output product exploration YAML path.")
+@click.option("--max-routes", type=int, default=12, show_default=True,
+              help="Maximum visible routes to map before flow selection.")
+@click.option("--wrapper", "wrapper_path", type=click.Path(dir_okay=False, path_type=Path),
+              default=Path("scripts/winbrowser"), show_default=True,
+              help="Browser wrapper command for OpenClaw Windows CDP.")
+def customer_explore(
+    target: str,
+    profile_path: Path,
+    out_path: Path,
+    max_routes: int,
+    wrapper_path: Path,
+) -> None:
+    try:
+        profile = load_model(profile_path, CustomerProfile)
+        exploration = explore_product(
+            ExperienceTarget(url=target),
+            profile,
+            max_routes=max_routes,
+            wrapper_path=wrapper_path,
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        save_yaml(exploration, out_path)
+    except (CustomerLoopError, FileNotFoundError, RuntimeError) as e:
+        console.print(f"[red]Customer exploration failed:[/red] {e}")
+        sys.exit(1)
+    console.print(f"[green]Customer exploration written:[/green] {out_path}")
+
+
 @main.command("customer-flow-session", help="Inspect, refine, run, and report a customer flow session.")
 @click.option("--target", required=True, help="Target product URL.")
 @click.option("--profile", "profile_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -469,10 +505,20 @@ def customer_flow_session(
         profile = load_model(profile_path, CustomerProfile)
         target_model = ExperienceTarget(url=target)
         out_dir.mkdir(parents=True, exist_ok=True)
+        exploration = None
+        planned_routes = list(routes)
+        if not planned_routes:
+            exploration = explore_product(
+                target_model,
+                profile,
+                wrapper_path=wrapper_path,
+            )
+            save_yaml(exploration, out_dir / "product_exploration.yaml")
+            planned_routes = routes_from_exploration(exploration)
         inspected = inspect_customer_flow_pack(
             target_model,
             profile,
-            list(routes),
+            planned_routes,
             wrapper_path=wrapper_path,
         )
         runnable = make_flow_pack_runnable(inspected)
@@ -486,6 +532,8 @@ def customer_flow_session(
             flow_path=out_dir / "runnable_flow.yaml",
         ))
         report = OpenClawWindowsFlowRunner(runnable, wrapper_path=wrapper_path).run(target_model, profile, plan, out_dir)
+        if exploration and report.evidence:
+            report.evidence[-1].metadata["product_exploration"] = exploration.model_dump(mode="json")
         write_report_artifacts(out_dir, profile, plan, report)
         (out_dir / "flow_refinement_report.md").write_text(
             render_flow_refinement_report(inspected, runnable, report),

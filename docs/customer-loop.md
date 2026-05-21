@@ -106,6 +106,22 @@ page, prioritizes main-content product/workflow routes over nav/footer links,
 and inspects the highest-value routes. Pass explicit `--route` values when a
 private app needs a known dashboard, settings, billing, or record screen.
 
+Map the product before generating flows:
+
+```bash
+teamnot customer-explore \
+  --target https://example-product.test \
+  --profile .teamnot/customer-loop/customer.yaml \
+  --out .teamnot/customer-loop/product_exploration.yaml
+```
+
+This planner reads visible internal routes/actions and produces a product map:
+route kinds, journey priorities, persona lenses, and coverage gaps. It is the
+generalization layer before flow execution. It marks auth/account/state,
+multi-persona buyer review, and domain-output correctness as explicit gaps
+unless the project provides a seeded account, domain fixture/oracle, or
+human-approved flow.
+
 Run a full inspected customer session:
 
 ```bash
@@ -116,12 +132,13 @@ teamnot customer-flow-session \
 ```
 
 This performs the productized loop for flow discovery: inspect the browser DOM,
-auto-discover route candidates when routes are not supplied, write
-`inspected_flow.yaml`, convert unresolved TODO/external-risky actions into a
-safer `runnable_flow.yaml`, execute that flow with screenshots, write the
-customer report, and emit `flow_refinement_report.md`. External downloads,
-installers, login, checkout, claim-offer, and account actions are verified as
-visible links/text unless a human-approved flow explicitly models the click.
+run the product exploration planner when routes are not supplied, write
+`product_exploration.yaml`, inspect selected routes, write `inspected_flow.yaml`,
+convert unresolved TODO/external-risky actions into a safer
+`runnable_flow.yaml`, execute that flow with screenshots, write the customer
+report, and emit `flow_refinement_report.md`. External downloads, installers,
+login, checkout, claim-offer, and account actions are verified as visible
+links/text unless a human-approved flow explicitly models the click.
 
 ## Artifacts
 
@@ -132,6 +149,7 @@ directory, commonly `.teamnot/customer-loop/<run-id>/`:
 - `customer_test_plan.yaml`
 - `customer_report.md`
 - `customer_report.json`
+- `product_exploration.yaml`
 - `inspected_flow.yaml`
 - `runnable_flow.yaml`
 - `flow_refinement_report.md`

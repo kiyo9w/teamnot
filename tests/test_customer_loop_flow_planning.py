@@ -11,10 +11,12 @@ from teamnot.customer_loop import (
     CustomerProfile,
     ExperienceTarget,
     discover_customer_routes,
+    explore_product,
     flow_pack_gaps,
     inspect_customer_flow_pack,
     make_flow_pack_runnable,
     render_flow_refinement_report,
+    routes_from_exploration,
     save_yaml,
     suggest_customer_flow_pack,
 )
@@ -344,6 +346,62 @@ def test_discover_customer_routes_prioritizes_main_workflow_routes(tmp_path: Pat
     assert "/" not in routes
     assert "/sales@example-product.test" not in routes
     assert "/void(0)" not in routes
+
+
+def test_explore_product_maps_journeys_and_coverage_gaps(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def command_runner(command):
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+        if action == "eval":
+            result = [
+                {"text": "Start building", "href": "https://example-product.test/app/projects", "inMain": True},
+                {"text": "Security", "href": "https://example-product.test/security", "inMain": True},
+                {"text": "Safety", "href": "https://example-product.test/safety", "inMain": True},
+                {"text": "Pricing", "href": "https://example-product.test/pricing", "inHeader": True},
+                {"text": "Sign in", "href": "https://example-product.test/login", "inHeader": True},
+                {"text": "Docs", "href": "https://example-product.test/docs/quickstart", "inMain": True},
+                {"text": "Contact sales", "href": "https://example-product.test/contact", "inFooter": True},
+            ]
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"ok": True, "result": result}),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    plan = explore_product(
+        ExperienceTarget(url="https://example-product.test/product"),
+        CustomerProfile(
+            persona="Security lead",
+            role="security lead",
+            current_workflow="review repository access",
+            buyer_user_split="developer uses it, security approves it",
+            trust_threshold="SOC2 and permission model",
+            alternatives=["Cursor"],
+        ),
+        wrapper_path=wrapper,
+        command_runner=command_runner,
+    )
+
+    route_by_path = {route.route: route for route in plan.routes}
+    assert route_by_path["/product"].kind == "landing"
+    assert route_by_path["/security"].kind == "trust"
+    assert route_by_path["/safety"].kind == "trust"
+    assert route_by_path["/login"].requires_auth is True
+    assert any(journey.id == "trust-adoption" for journey in plan.journeys)
+    assert any(journey.id == "stateful-product" and journey.coverage_status == "blocked" for journey in plan.journeys)
+    assert "daily user" in plan.personas
+    assert any("Auth/account state" in gap for gap in plan.coverage_gaps)
+    assert any("multi-persona" in gap for gap in plan.coverage_gaps)
+    selected = routes_from_exploration(plan)
+    assert "/login" not in selected
+    assert "/security" in selected
 
 
 def test_inspect_customer_flow_pack_discovers_routes_when_unseeded(tmp_path: Path):

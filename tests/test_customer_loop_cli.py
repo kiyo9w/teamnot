@@ -7,6 +7,7 @@ from click.testing import CliRunner
 import teamnot.cli.__main__ as cli
 from teamnot.cli.__main__ import main
 from teamnot.customer_loop.models import (
+    CustomerEvidence,
     CustomerFlow,
     CustomerFlowPack,
     CustomerFlowStep,
@@ -21,6 +22,7 @@ def test_customer_loop_commands_are_visible_in_help():
     assert "customer-loop" in result.output
     assert "customer-flow-plan" in result.output
     assert "customer-flow-inspect" in result.output
+    assert "customer-explore" in result.output
     assert "customer-flow-session" in result.output
 
 
@@ -67,6 +69,13 @@ def test_customer_flow_inspect_help_exposes_required_options():
         assert option in result.output
 
 
+def test_customer_explore_help_exposes_required_options():
+    result = CliRunner().invoke(main, ["customer-explore", "--help"])
+    assert result.exit_code == 0
+    for option in ["--target", "--profile", "--out", "--max-routes", "--wrapper"]:
+        assert option in result.output
+
+
 def test_customer_flow_session_help_exposes_required_options():
     result = CliRunner().invoke(main, ["customer-flow-session", "--help"])
     assert result.exit_code == 0
@@ -106,6 +115,8 @@ def test_customer_flow_session_passes_custom_wrapper_to_runner(tmp_path: Path, m
             "https://example-product.test",
             "--profile",
             str(profile),
+            "--route",
+            "/",
             "--out",
             str(out),
             "--wrapper",
@@ -115,6 +126,70 @@ def test_customer_flow_session_passes_custom_wrapper_to_runner(tmp_path: Path, m
 
     assert result.exit_code == 0, result.output
     assert captured["wrapper_path"] == wrapper
+
+
+def test_customer_flow_session_writes_exploration_when_routes_are_unseeded(tmp_path: Path, monkeypatch):
+    profile = tmp_path / "profile.yaml"
+    profile.write_text("persona: Developer\nrole: engineer\n", encoding="utf-8")
+    out = tmp_path / "session"
+    wrapper = tmp_path / "custom-winbrowser"
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    flow_pack = CustomerFlowPack(
+        name="Inspected",
+        flows=[CustomerFlow(name="Core", steps=[CustomerFlowStep(id="loaded", action="assert_selector", selector="main")])],
+    )
+    captured: dict[str, object] = {}
+
+    class FakeExploration:
+        def model_dump(self, mode="python"):
+            return {
+                "routes": [{"route": "/", "kind": "landing", "coverage_status": "planned", "priority": 10}],
+                "journeys": [{"id": "first-value", "coverage_status": "planned", "routes": ["/"], "gaps": []}],
+                "coverage_gaps": ["Add domain fixtures/oracles before claiming output correctness."],
+                "personas": ["Developer"],
+            }
+
+    exploration = FakeExploration()
+    monkeypatch.setattr(cli, "explore_product", lambda *args, **kwargs: exploration)
+    monkeypatch.setattr(cli, "routes_from_exploration", lambda plan: ["/"])
+    monkeypatch.setattr(cli, "inspect_customer_flow_pack", lambda *args, **kwargs: flow_pack)
+
+    def fake_save_yaml(data, path):
+        captured[str(Path(path).name)] = data
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text("ok: true\n", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(cli, "save_yaml", fake_save_yaml)
+
+    class FakeFlowRunner:
+        def __init__(self, flow_pack, wrapper_path):
+            pass
+
+        def run(self, target, profile_model, plan, out_dir):
+            report = CustomerReport(profile=profile_model, target=target, plan=plan, summary="ok")
+            report.evidence.append(CustomerEvidence(kind="browser_flow"))
+            return report
+
+    monkeypatch.setattr(cli, "OpenClawWindowsFlowRunner", FakeFlowRunner)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "customer-flow-session",
+            "--target",
+            "https://example-product.test",
+            "--profile",
+            str(profile),
+            "--out",
+            str(out),
+            "--wrapper",
+            str(wrapper),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "product_exploration.yaml" in captured
 
 
 def test_customer_loop_manual_mode_writes_artifacts(tmp_path: Path):

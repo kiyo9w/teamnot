@@ -64,6 +64,9 @@ def render_customer_report(report: CustomerReport) -> str:
         "## Route-By-Route Analysis",
         *_render_route_analysis(report),
         "",
+        "## Product Exploration Map",
+        *_render_product_exploration(report),
+        "",
         "## Dimension Assessment",
         *_render_dimension_assessment(report),
         "",
@@ -339,6 +342,49 @@ def _render_route_analysis(report: CustomerReport) -> list[str]:
     return lines or ["- Multi-route evidence existed but no flow metadata was available."]
 
 
+def _render_product_exploration(report: CustomerReport) -> list[str]:
+    exploration = _exploration_metadata(report)
+    if not exploration:
+        return ["- No product exploration planner artifact was attached to this report."]
+    routes = exploration.get("routes", []) if isinstance(exploration.get("routes"), list) else []
+    journeys = exploration.get("journeys", []) if isinstance(exploration.get("journeys"), list) else []
+    gaps = exploration.get("coverage_gaps", []) if isinstance(exploration.get("coverage_gaps"), list) else []
+    personas = exploration.get("personas", []) if isinstance(exploration.get("personas"), list) else []
+    lines = []
+    if personas:
+        lines.append(f"- Personas/lenses: {', '.join(str(persona) for persona in personas)}")
+    if routes:
+        route_bits = []
+        for route in routes[:10]:
+            if not isinstance(route, dict):
+                continue
+            route_bits.append(
+                f"{route.get('route')}[{route.get('kind')}, {route.get('coverage_status')}, p{route.get('priority')}]"
+            )
+        lines.append("- Route map: " + "; ".join(route_bits))
+    for journey in journeys:
+        if not isinstance(journey, dict):
+            continue
+        route_list = ", ".join(str(route) for route in journey.get("routes", [])[:4]) or "no mapped route"
+        gap_list = "; ".join(str(gap) for gap in journey.get("gaps", [])[:3]) or "none"
+        lines.append(
+            f"- Journey `{journey.get('id')}`: {journey.get('coverage_status')} "
+            f"via {route_list}; gaps: {gap_list}"
+        )
+    if gaps:
+        lines.append("- Planner gaps: " + "; ".join(str(gap) for gap in gaps[:6]))
+    return lines or ["- Product exploration metadata was present but empty."]
+
+
+def _exploration_metadata(report: CustomerReport) -> dict:
+    for evidence in report.evidence:
+        metadata = evidence.metadata if isinstance(evidence.metadata, dict) else {}
+        exploration = metadata.get("product_exploration")
+        if isinstance(exploration, dict):
+            return exploration
+    return {}
+
+
 def _render_dimension_assessment(report: CustomerReport) -> list[str]:
     markers = _markers(report)
     dimensions = [
@@ -379,6 +425,15 @@ def _render_next_research_actions(report: CustomerReport) -> list[str]:
         actions.append("- Run a JTBD pass: push, pull, anxiety, habit, trigger, and success metric.")
     if "STEP_SKIP|buyer-user-mismatch" in raw:
         actions.append("- Add a buyer/security/manager persona and compare objections against the daily user.")
+    exploration = _exploration_metadata(report)
+    if exploration:
+        gaps = exploration.get("coverage_gaps", []) if isinstance(exploration.get("coverage_gaps"), list) else []
+        if any("Auth/account state" in str(gap) for gap in gaps):
+            actions.append("- Provide a seeded test account, cleanup policy, and state reset plan for authenticated journeys.")
+        if any("multi-persona" in str(gap).lower() for gap in gaps):
+            actions.append("- Run a multi-persona panel and compare daily-user, buyer, and security objections.")
+        if any("domain fixtures" in str(gap).lower() for gap in gaps):
+            actions.append("- Add domain fixtures or oracle checks before claiming output correctness.")
     if "STEP_FAIL|mobile-review" in raw:
         actions.append("- Re-run the highest-value flow on phone width after fixing mobile layout offenders.")
     if "STEP_FAIL|error-recovery" in raw:
