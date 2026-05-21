@@ -57,6 +57,7 @@ from teamnot.customer_loop.runners import (
     OpenClawWindowsInteractiveRunner,
     OpenClawWindowsResearcherRunner,
     OpenClawWindowsSessionRunner,
+    PersistentWinBrowserCommandRunner,
 )
 
 __all__ = [
@@ -88,6 +89,7 @@ __all__ = [
     "OpenClawWindowsInteractiveRunner",
     "OpenClawWindowsResearcherRunner",
     "OpenClawWindowsSessionRunner",
+    "PersistentWinBrowserCommandRunner",
     "ProductExplorationPlan",
     "ProductJourney",
     "ProductRoute",

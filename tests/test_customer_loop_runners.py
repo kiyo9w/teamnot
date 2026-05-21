@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from teamnot.customer_loop import (
     OpenClawWindowsInteractiveRunner,
     OpenClawWindowsResearcherRunner,
     OpenClawWindowsSessionRunner,
+    PersistentWinBrowserCommandRunner,
 )
 from teamnot.customer_loop.artifacts import render_customer_report
 from teamnot.customer_loop.models import (
@@ -111,6 +113,54 @@ def test_transient_browser_failures_are_recognized_for_retry():
     )
 
     assert runner_module._transient_browser_failure(result)
+
+
+def test_persistent_runner_maps_legacy_wrapper_commands_to_session_payload(monkeypatch, tmp_path: Path):
+    sent_payloads: list[dict] = []
+    runner = PersistentWinBrowserCommandRunner(wrapper_path=tmp_path / "winbrowser")
+
+    def fake_request(payload, timeout=75):
+        sent_payloads.append(payload)
+        return {"ok": True, "action": payload["action"], "sessionId": "test-session"}
+
+    monkeypatch.setattr(runner, "_request", fake_request)
+
+    result = runner([
+        "scripts/winbrowser",
+        "--action",
+        "navigate",
+        "--url",
+        "https://example-product.test/app",
+        "--timeout",
+        "12000",
+    ])
+
+    assert result.returncode == 0
+    assert sent_payloads == [{
+        "action": "navigate",
+        "url": "https://example-product.test/app",
+        "timeout": 12000,
+    }]
+    assert json.loads(result.stdout)["sessionId"] == "test-session"
+
+
+def test_persistent_runner_keeps_screenshots_and_eval_on_same_session(monkeypatch, tmp_path: Path):
+    sent_payloads: list[dict] = []
+    runner = PersistentWinBrowserCommandRunner(wrapper_path=tmp_path / "winbrowser")
+
+    def fake_request(payload, timeout=75):
+        sent_payloads.append(payload)
+        return {"ok": True, "action": payload["action"]}
+
+    monkeypatch.setattr(runner, "_request", fake_request)
+
+    runner(["scripts/winbrowser", "--action", "eval", "--expr", "document.title"])
+    runner(["scripts/winbrowser", "--action", "screenshot", "--out", "C:\\tmp\\shot.png", "--full-page"])
+
+    assert sent_payloads == [
+        {"action": "eval", "expr": "document.title"},
+        {"action": "screenshot", "out": "C:\\tmp\\shot.png", "fullPage": True},
+    ]
 
 
 def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):

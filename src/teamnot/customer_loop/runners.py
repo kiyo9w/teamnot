@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import select
 import subprocess
 from collections.abc import Callable, Sequence
 from hashlib import sha256
@@ -38,6 +39,115 @@ from teamnot.customer_loop.models import (
 )
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+
+
+class PersistentWinBrowserCommandRunner:
+    """Keep one Windows Chrome/CDP session alive for a whole customer run."""
+
+    def __init__(
+        self,
+        wrapper_path: str | Path = "scripts/winbrowser",
+        node_path: str | Path | None = None,
+        cdp_url: str | None = None,
+    ):
+        self.wrapper_path = Path(wrapper_path)
+        self.node_path = str(
+            node_path
+            or os.environ.get("TEAMNOT_WINDOWS_NODE")
+            or "/mnt/c/Program Files/nodejs/node.exe"
+        )
+        self.cdp_url = cdp_url or os.environ.get("TEAMNOT_CDP_URL") or "http://127.0.0.1:18801"
+        self.script_path = Path(__file__).with_name("winbrowser_session.mjs")
+        self._process: subprocess.Popen[str] | None = None
+        self._counter = 0
+
+    def __call__(self, command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        command_list = list(command)
+        payload = self._payload_from_command(command_list)
+        try:
+            response = self._request(payload)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return subprocess.CompletedProcess(command_list, 1, stdout="", stderr=str(exc))
+        stdout = json.dumps(response)
+        return subprocess.CompletedProcess(
+            command_list,
+            0 if response.get("ok") is not False else 1,
+            stdout=stdout,
+            stderr="" if response.get("ok") is not False else str(response.get("error", response)),
+        )
+
+    def close(self) -> None:
+        if not self._process:
+            return
+        try:
+            self._request({"action": "close"}, timeout=10)
+        except Exception:
+            self._process.terminate()
+        finally:
+            self._process = None
+
+    def _ensure_process(self) -> subprocess.Popen[str]:
+        if self._process and self._process.poll() is None:
+            return self._process
+        script = _path_for_windows_wrapper(self.script_path)
+        self._process = subprocess.Popen(
+            [
+                self.node_path,
+                script,
+                "--cdp",
+                self.cdp_url,
+                "--session-id",
+                f"teamnot-customer-{os.getpid()}",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        return self._process
+
+    def _request(self, payload: dict, timeout: int = 75) -> dict:
+        process = self._ensure_process()
+        if process.stdin is None or process.stdout is None:
+            raise OSError("persistent browser session did not expose stdio")
+        self._counter += 1
+        request = {"id": self._counter, **payload}
+        process.stdin.write(json.dumps(request) + "\n")
+        process.stdin.flush()
+        line = _readline_with_timeout(process, timeout=timeout)
+        try:
+            parsed = json.loads(line.strip() or "{}")
+        except json.JSONDecodeError as exc:
+            raise OSError(f"persistent browser session returned non-JSON output: {line[:200]}") from exc
+        return parsed if isinstance(parsed, dict) else {"ok": True, "result": parsed}
+
+    @staticmethod
+    def _payload_from_command(command: list[str]) -> dict:
+        args = command[1:]
+        action = _arg_value(args, "--action", args[0] if args else "status")
+        payload: dict = {"action": action}
+        if "--cdp" in args:
+            payload["cdp"] = _arg_value(args, "--cdp")
+        if action == "navigate":
+            payload["url"] = _arg_value(args, "--url")
+            payload["timeout"] = int(_arg_value(args, "--timeout", "30000") or "30000")
+        elif action == "screenshot":
+            payload["out"] = _arg_value(args, "--out")
+            payload["fullPage"] = "--full-page" in args
+        elif action == "viewport":
+            payload["width"] = int(_arg_value(args, "--width", "390") or "390")
+            payload["height"] = int(_arg_value(args, "--height", "844") or "844")
+        elif action == "upload":
+            payload["selector"] = _arg_value(args, "--selector")
+            payload["file"] = _arg_value(args, "--file")
+            payload["timeout"] = int(_arg_value(args, "--timeout", "30000") or "30000")
+        elif action == "cookies":
+            urls = _arg_value(args, "--urls")
+            payload["urls"] = [url.strip() for url in urls.split(",") if url.strip()] if urls else []
+        elif action == "eval":
+            payload["expr"] = _arg_value(args, "--expr")
+        return payload
 
 
 class ExperienceRunner(Protocol):
@@ -462,6 +572,9 @@ class OpenClawWindowsSessionRunner(OpenClawWindowsCDPRunner):
         file_fixture_path: str | Path | None = None,
     ):
         super().__init__(wrapper_path=wrapper_path, command_runner=command_runner)
+        self._owns_persistent_session = command_runner is None
+        if command_runner is None:
+            self.command_runner = PersistentWinBrowserCommandRunner(self.wrapper_path)
         self.file_fixture_path = Path(file_fixture_path).expanduser() if file_fixture_path else None
 
     def run(
@@ -471,54 +584,58 @@ class OpenClawWindowsSessionRunner(OpenClawWindowsCDPRunner):
         plan: CustomerTestPlan,
         out_dir: Path,
     ) -> CustomerReport:
-        exploration = _safe_explore_product(target, profile, self.wrapper_path, self.command_runner)
-        planned_routes = routes_from_exploration(exploration)
-        inspected = _safe_inspect_customer_flow_pack(
-            target,
-            profile,
-            planned_routes,
-            self.wrapper_path,
-            self.command_runner,
-        )
-        runnable = make_flow_pack_runnable(inspected, file_fixture_path=self.file_fixture_path)
-        screen_exploration = self._explore_screens(target, planned_routes, out_dir)
-        save_yaml(exploration, out_dir / "product_exploration.yaml")
-        save_yaml(screen_exploration, out_dir / "screen_exploration.yaml")
-        save_yaml(inspected, out_dir / "inspected_flow.yaml")
-        save_yaml(runnable, out_dir / "runnable_flow.yaml")
-
         try:
-            report = OpenClawWindowsFlowRunner(
-                runnable,
-                wrapper_path=self.wrapper_path,
-                command_runner=self.command_runner,
-            ).run(target, profile, plan, out_dir)
-        except CustomerLoopRunnerError as exc:
-            report = _degraded_browser_report(target, profile, plan, "openclaw-windows-session", exc)
-        if report.evidence:
-            report.evidence[0].metadata["runner"] = "openclaw-windows-session"
-            report.evidence[0].metadata["method"] = (
-                "fresh product exploration, inspected flow planning, and real Windows Chrome flow execution"
+            exploration = _safe_explore_product(target, profile, self.wrapper_path, self.command_runner)
+            planned_routes = routes_from_exploration(exploration)
+            inspected = _safe_inspect_customer_flow_pack(
+                target,
+                profile,
+                planned_routes,
+                self.wrapper_path,
+                self.command_runner,
             )
-            report.evidence[-1].metadata["product_exploration"] = exploration.model_dump(mode="json")
-            report.evidence[-1].metadata["screen_exploration"] = screen_exploration
-            report.evidence[-1].metadata["inspected_flow_pack"] = inspected.model_dump(mode="json")
-            report.evidence[-1].metadata["runnable_flow_pack_path"] = str(out_dir / "runnable_flow.yaml")
-        screen_evidence, screen_findings = _screen_exploration_evidence(screen_exploration)
-        report.evidence.append(screen_evidence)
-        for finding in screen_findings:
-            finding.evidence.append(screen_evidence)
-        report.findings.extend(screen_findings)
-        (out_dir / "flow_refinement_report.md").write_text(
-            render_flow_refinement_report(inspected, runnable, report),
-            encoding="utf-8",
-        )
-        report.summary = (
-            "Customer-testing-openclaw session completed with fresh product exploration, "
-            "flow inspection, and real Windows CDP flow execution. "
-            f"{len(report.findings)} customer-impact finding(s) identified."
-        )
-        return report
+            runnable = make_flow_pack_runnable(inspected, file_fixture_path=self.file_fixture_path)
+            screen_exploration = self._explore_screens(target, planned_routes, out_dir)
+            save_yaml(exploration, out_dir / "product_exploration.yaml")
+            save_yaml(screen_exploration, out_dir / "screen_exploration.yaml")
+            save_yaml(inspected, out_dir / "inspected_flow.yaml")
+            save_yaml(runnable, out_dir / "runnable_flow.yaml")
+
+            try:
+                report = OpenClawWindowsFlowRunner(
+                    runnable,
+                    wrapper_path=self.wrapper_path,
+                    command_runner=self.command_runner,
+                ).run(target, profile, plan, out_dir)
+            except CustomerLoopRunnerError as exc:
+                report = _degraded_browser_report(target, profile, plan, "openclaw-windows-session", exc)
+            if report.evidence:
+                report.evidence[0].metadata["runner"] = "openclaw-windows-session"
+                report.evidence[0].metadata["method"] = (
+                    "fresh product exploration, inspected flow planning, and real Windows Chrome flow execution"
+                )
+                report.evidence[-1].metadata["product_exploration"] = exploration.model_dump(mode="json")
+                report.evidence[-1].metadata["screen_exploration"] = screen_exploration
+                report.evidence[-1].metadata["inspected_flow_pack"] = inspected.model_dump(mode="json")
+                report.evidence[-1].metadata["runnable_flow_pack_path"] = str(out_dir / "runnable_flow.yaml")
+            screen_evidence, screen_findings = _screen_exploration_evidence(screen_exploration)
+            report.evidence.append(screen_evidence)
+            for finding in screen_findings:
+                finding.evidence.append(screen_evidence)
+            report.findings.extend(screen_findings)
+            (out_dir / "flow_refinement_report.md").write_text(
+                render_flow_refinement_report(inspected, runnable, report),
+                encoding="utf-8",
+            )
+            report.summary = (
+                "Customer-testing-openclaw session completed with fresh product exploration, "
+                "flow inspection, and real Windows CDP flow execution. "
+                f"{len(report.findings)} customer-impact finding(s) identified."
+            )
+            return report
+        finally:
+            if self._owns_persistent_session and isinstance(self.command_runner, PersistentWinBrowserCommandRunner):
+                self.command_runner.close()
 
     def _explore_screens(
         self,
@@ -673,66 +790,70 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
         plan: CustomerTestPlan,
         out_dir: Path,
     ) -> CustomerReport:
-        exploration = _safe_explore_product(target, profile, self.wrapper_path, self.command_runner)
-        planned_routes = routes_from_exploration(exploration, max_routes=9)
-        screen_exploration = self._explore_screens(target, planned_routes, out_dir)
-        research_brain = self._research_brain_pass(target, profile, planned_routes, out_dir)
-        routes_for_flow = _dedupe_strings([
-            *planned_routes,
-            *screen_exploration.get("routes_discovered", []),
-            *research_brain.get("routes_discovered", []),
-        ])[:9]
-        inspected = _safe_inspect_customer_flow_pack(
-            target,
-            profile,
-            routes_for_flow,
-            self.wrapper_path,
-            self.command_runner,
-        )
-        runnable = make_flow_pack_runnable(inspected, file_fixture_path=self.file_fixture_path)
-        save_yaml(exploration, out_dir / "product_exploration.yaml")
-        save_yaml(screen_exploration, out_dir / "screen_exploration.yaml")
-        save_yaml(research_brain, out_dir / "research_brain.yaml")
-        save_yaml(inspected, out_dir / "inspected_flow.yaml")
-        save_yaml(runnable, out_dir / "runnable_flow.yaml")
-
         try:
-            report = OpenClawWindowsFlowRunner(
-                runnable,
-                wrapper_path=self.wrapper_path,
-                command_runner=self.command_runner,
-            ).run(target, profile, plan, out_dir)
-        except CustomerLoopRunnerError as exc:
-            report = _degraded_browser_report(target, profile, plan, "openclaw-windows-researcher", exc)
-        if report.evidence:
-            report.evidence[0].metadata["runner"] = "openclaw-windows-researcher"
-            report.evidence[0].metadata["method"] = (
-                "agentic customer researcher runtime: route exploration, screen actions, form/adversarial branches, "
-                "and configured flow execution in real Windows Chrome/CDP"
+            exploration = _safe_explore_product(target, profile, self.wrapper_path, self.command_runner)
+            planned_routes = routes_from_exploration(exploration, max_routes=9)
+            screen_exploration = self._explore_screens(target, planned_routes, out_dir)
+            research_brain = self._research_brain_pass(target, profile, planned_routes, out_dir)
+            routes_for_flow = _dedupe_strings([
+                *planned_routes,
+                *screen_exploration.get("routes_discovered", []),
+                *research_brain.get("routes_discovered", []),
+            ])[:9]
+            inspected = _safe_inspect_customer_flow_pack(
+                target,
+                profile,
+                routes_for_flow,
+                self.wrapper_path,
+                self.command_runner,
             )
-            report.evidence[-1].metadata["product_exploration"] = exploration.model_dump(mode="json")
-            report.evidence[-1].metadata["screen_exploration"] = screen_exploration
-            report.evidence[-1].metadata["research_brain"] = research_brain
-            report.evidence[-1].metadata["inspected_flow_pack"] = inspected.model_dump(mode="json")
-            report.evidence[-1].metadata["runnable_flow_pack_path"] = str(out_dir / "runnable_flow.yaml")
-        for evidence, findings in (
-            _screen_exploration_evidence(screen_exploration),
-            _research_brain_evidence(research_brain),
-        ):
-            report.evidence.append(evidence)
-            for finding in findings:
-                finding.evidence.append(evidence)
-            report.findings.extend(findings)
-        (out_dir / "flow_refinement_report.md").write_text(
-            render_flow_refinement_report(inspected, runnable, report),
-            encoding="utf-8",
-        )
-        report.summary = (
-            "Customer-testing-openclaw researcher run completed with product exploration, "
-            "screen-level action evidence, form/adversarial branch testing, and real Windows CDP flow execution. "
-            f"{len(report.findings)} customer-impact finding(s) identified."
-        )
-        return report
+            runnable = make_flow_pack_runnable(inspected, file_fixture_path=self.file_fixture_path)
+            save_yaml(exploration, out_dir / "product_exploration.yaml")
+            save_yaml(screen_exploration, out_dir / "screen_exploration.yaml")
+            save_yaml(research_brain, out_dir / "research_brain.yaml")
+            save_yaml(inspected, out_dir / "inspected_flow.yaml")
+            save_yaml(runnable, out_dir / "runnable_flow.yaml")
+
+            try:
+                report = OpenClawWindowsFlowRunner(
+                    runnable,
+                    wrapper_path=self.wrapper_path,
+                    command_runner=self.command_runner,
+                ).run(target, profile, plan, out_dir)
+            except CustomerLoopRunnerError as exc:
+                report = _degraded_browser_report(target, profile, plan, "openclaw-windows-researcher", exc)
+            if report.evidence:
+                report.evidence[0].metadata["runner"] = "openclaw-windows-researcher"
+                report.evidence[0].metadata["method"] = (
+                    "agentic customer researcher runtime: route exploration, screen actions, form/adversarial branches, "
+                    "and configured flow execution in real Windows Chrome/CDP"
+                )
+                report.evidence[-1].metadata["product_exploration"] = exploration.model_dump(mode="json")
+                report.evidence[-1].metadata["screen_exploration"] = screen_exploration
+                report.evidence[-1].metadata["research_brain"] = research_brain
+                report.evidence[-1].metadata["inspected_flow_pack"] = inspected.model_dump(mode="json")
+                report.evidence[-1].metadata["runnable_flow_pack_path"] = str(out_dir / "runnable_flow.yaml")
+            for evidence, findings in (
+                _screen_exploration_evidence(screen_exploration),
+                _research_brain_evidence(research_brain),
+            ):
+                report.evidence.append(evidence)
+                for finding in findings:
+                    finding.evidence.append(evidence)
+                report.findings.extend(findings)
+            (out_dir / "flow_refinement_report.md").write_text(
+                render_flow_refinement_report(inspected, runnable, report),
+                encoding="utf-8",
+            )
+            report.summary = (
+                "Customer-testing-openclaw researcher run completed with product exploration, "
+                "screen-level action evidence, form/adversarial branch testing, and real Windows CDP flow execution. "
+                f"{len(report.findings)} customer-impact finding(s) identified."
+            )
+            return report
+        finally:
+            if self._owns_persistent_session and isinstance(self.command_runner, PersistentWinBrowserCommandRunner):
+                self.command_runner.close()
 
     def _research_brain_pass(
         self,
@@ -866,6 +987,32 @@ def _parse_json_stdout(result: subprocess.CompletedProcess[str]) -> dict:
     if isinstance(parsed, dict) and parsed.get("ok") is False:
         raise CustomerLoopRunnerError(f"OpenClaw wrapper reported failure: {parsed}")
     return parsed if isinstance(parsed, dict) else {"result": parsed}
+
+
+def _arg_value(args: Sequence[str], name: str, default: str = "") -> str:
+    try:
+        index = list(args).index(name)
+    except ValueError:
+        return default
+    return str(args[index + 1]) if index + 1 < len(args) else default
+
+
+def _readline_with_timeout(process: subprocess.Popen[str], timeout: int) -> str:
+    if process.stdout is None:
+        raise OSError("process stdout is not available")
+    ready, _, _ = select.select([process.stdout], [], [], timeout)
+    if not ready:
+        raise subprocess.TimeoutExpired(process.args, timeout=timeout)
+    line = process.stdout.readline()
+    if not line:
+        stderr = ""
+        if process.stderr is not None:
+            try:
+                stderr = process.stderr.read()
+            except Exception:
+                stderr = ""
+        raise OSError(f"persistent browser session exited unexpectedly: {stderr[:500]}")
+    return line
 
 
 def _transient_browser_failure(result: subprocess.CompletedProcess[str]) -> bool:
