@@ -255,6 +255,14 @@ def _render_route_analysis(report: CustomerReport) -> list[str]:
         str(result.get("flow")) for result in results
         if isinstance(result, dict) and result.get("passed") is False
     }
+    skipped_by_flow = {
+        str(result.get("flow")) for result in results
+        if isinstance(result, dict) and result.get("skipped")
+    }
+    executed_by_flow = {
+        str(result.get("flow")) for result in results
+        if isinstance(result, dict) and result.get("id")
+    }
     lines = []
     for flow in flows:
         if not isinstance(flow, dict):
@@ -270,7 +278,14 @@ def _render_route_analysis(report: CustomerReport) -> list[str]:
             1 for step in steps
             if isinstance(step, dict) and step.get("action") == "checkpoint"
         )
-        status = "failed" if name in failed_by_flow else "covered"
+        if name in failed_by_flow:
+            status = "failed"
+        elif name in skipped_by_flow:
+            status = "partially covered"
+        elif name in executed_by_flow:
+            status = "covered"
+        else:
+            status = "not executed"
         lines.append(
             f"- {name} (`{route}`): {status}; {executable} executable step(s), "
             f"{checkpoints} interpretation checkpoint(s)."

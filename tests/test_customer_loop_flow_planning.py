@@ -316,6 +316,8 @@ def test_discover_customer_routes_prioritizes_main_workflow_routes(tmp_path: Pat
                 {"text": "Invite team", "href": "https://example-product.test/settings/team", "inMain": True},
                 {"text": "Privacy Policy", "href": "https://example-product.test/policies/privacy-policy", "inFooter": True},
                 {"text": "External docs", "href": "https://docs.example.test/", "inMain": True},
+                {"text": "Email sales", "href": "mailto:sales@example-product.test", "inMain": True},
+                {"text": "Open menu", "href": "javascript:void(0)", "inMain": True},
             ]
             return subprocess.CompletedProcess(
                 command,
@@ -340,6 +342,8 @@ def test_discover_customer_routes_prioritizes_main_workflow_routes(tmp_path: Pat
     assert routes[0] == "/product"
     assert set(routes[1:]) == {"/app/projects", "/settings/team"}
     assert "/" not in routes
+    assert "/sales@example-product.test" not in routes
+    assert "/void(0)" not in routes
 
 
 def test_inspect_customer_flow_pack_discovers_routes_when_unseeded(tmp_path: Path):

@@ -297,6 +297,9 @@ class OpenClawWindowsFlowRunner(OpenClawWindowsInteractiveRunner):
                 if result.get("passed"):
                     markers.append(f"STEP_PASS|{marker_id}|{result.get('summary', step.action)}")
                     continue
+                if result.get("skipped"):
+                    markers.append(f"STEP_SKIP|{marker_id}|{result.get('summary', step.action)}")
+                    continue
                 markers.append(f"STEP_FAIL|{marker_id}|{result.get('summary', step.action)}")
                 findings.append(_browser_finding(
                     f"flow-{flow_slug}-{_slug(step.id)}-failed",
@@ -308,8 +311,6 @@ class OpenClawWindowsFlowRunner(OpenClawWindowsInteractiveRunner):
                     f"Fix the product or flow target so `{flow.name}` step `{step.id}` can complete.",
                     core=True,
                 ))
-                break
-            if findings:
                 break
         evidence = CustomerEvidence(
             kind="browser_flow",
@@ -372,6 +373,14 @@ class OpenClawWindowsFlowRunner(OpenClawWindowsInteractiveRunner):
                 "passed": True,
                 "summary": f"uploaded {step.file} into {step.selector}",
                 "result": uploaded,
+            }
+        if step.action == "checkpoint":
+            return {
+                "id": step.id,
+                "action": step.action,
+                "passed": None,
+                "skipped": True,
+                "summary": step.description or step.id,
             }
         result = _parse_json_stdout(
             self._run(["--action", "eval", "--expr", _flow_step_expr(step)])

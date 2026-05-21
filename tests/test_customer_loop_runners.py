@@ -624,6 +624,162 @@ def test_openclaw_flow_runner_executes_multi_screen_non_upload_flow_pack(tmp_pat
     assert report.findings == []
 
 
+def test_openclaw_flow_runner_continues_other_flows_after_step_failure(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    commands: list[list[str]] = []
+    step_calls = 0
+
+    def command_runner(command):
+        nonlocal step_calls
+        commands.append(list(command))
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "title": "Dashboard"}', stderr="")
+        if action == "viewport":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+        if action == "eval" and "--expr" in command and "step.action" in command[-1]:
+            step_calls += 1
+            if step_calls == 1:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout='{"ok": true, "result": {"passed": false, "summary": "missing create button"}}',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"ok": true, "result": {"passed": true, "summary": "invite sent"}}',
+                stderr="",
+            )
+        if action == "eval":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"ok": true, "result": {'
+                    '"title": "Mock SaaS",'
+                    '"headings": ["Projects"],'
+                    '"buttons": ["Create project", "Invite"],'
+                    '"inputs": [],'
+                    '"forms": [],'
+                    '"links": [],'
+                    '"primaryActionText": ["Create project", "Invite"],'
+                    '"bodyText": "Create projects, invite teammates, privacy, support, demo, retry, result report.",'
+                    '"viewport": {"width": 1280, "height": 900},'
+                    '"timingMs": 123,'
+                    '"failedResources": [],'
+                    '"hasHorizontalOverflow": false,'
+                    '"focusableCount": 2,'
+                    '"imagesWithoutAlt": 0,'
+                    '"landmarkCount": 2,'
+                    '"semanticSignals": {'
+                    '"hasPricing": true, "hasSupport": true, "hasPrivacy": true,'
+                    '"hasSample": true, "hasErrorRecovery": true, "hasCollaboration": true'
+                    "}"
+                    "}}"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    flow_pack = CustomerFlowPack(
+        name="SaaS operator journeys",
+        flows=[
+            CustomerFlow(
+                name="Create project",
+                start_url="/projects",
+                steps=[CustomerFlowStep(id="create-project", action="click_text", text="Create project")],
+            ),
+            CustomerFlow(
+                name="Invite teammate",
+                start_url="/settings/team",
+                steps=[CustomerFlowStep(id="send-invite", action="click_text", text="Invite")],
+            ),
+        ],
+    )
+    target, profile, plan = _plan(tmp_path)
+    report = OpenClawWindowsFlowRunner(flow_pack, wrapper_path=wrapper, command_runner=command_runner).run(
+        target, profile, plan, tmp_path / "out"
+    )
+
+    raw = report.evidence[1].raw_excerpt
+    assert "STEP_FAIL|flow-create-project-create-project|missing create button" in raw
+    assert "STEP_PASS|flow-invite-teammate-send-invite|invite sent" in raw
+    assert len(report.evidence[1].screenshot_paths) == 2
+    navigated_urls = [cmd[cmd.index("--url") + 1] for cmd in commands if "--url" in cmd]
+    assert "https://example-product.test/projects" in navigated_urls
+    assert "https://example-product.test/settings/team" in navigated_urls
+    assert "flow-create-project-create-project-failed" in {finding.id for finding in report.findings}
+
+
+def test_openclaw_flow_runner_marks_checkpoints_as_skipped_not_passed(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def command_runner(command):
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "title": "Dashboard"}', stderr="")
+        if action == "viewport":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+        if action == "eval":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"ok": true, "result": {'
+                    '"title": "Mock SaaS",'
+                    '"headings": ["Projects"],'
+                    '"buttons": ["Create project"],'
+                    '"inputs": [],'
+                    '"forms": [],'
+                    '"links": [],'
+                    '"primaryActionText": ["Create project"],'
+                    '"bodyText": "Create projects, privacy, support, demo, retry, result report.",'
+                    '"viewport": {"width": 1280, "height": 900},'
+                    '"timingMs": 123,'
+                    '"failedResources": [],'
+                    '"hasHorizontalOverflow": false,'
+                    '"focusableCount": 1,'
+                    '"imagesWithoutAlt": 0,'
+                    '"landmarkCount": 2,'
+                    '"semanticSignals": {'
+                    '"hasPricing": true, "hasSupport": true, "hasPrivacy": true,'
+                    '"hasSample": true, "hasErrorRecovery": true, "hasCollaboration": true'
+                    "}"
+                    "}}"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    flow = CustomerFlow(
+        name="Buyer proof review",
+        start_url="/security",
+        steps=[
+            CustomerFlowStep(
+                id="security-owner-judgment",
+                action="checkpoint",
+                description="Security owner must judge whether proof is sufficient.",
+            )
+        ],
+    )
+    target, profile, plan = _plan(tmp_path)
+    report = OpenClawWindowsFlowRunner(flow, wrapper_path=wrapper, command_runner=command_runner).run(
+        target, profile, plan, tmp_path / "out"
+    )
+
+    raw = report.evidence[1].raw_excerpt
+    assert "STEP_SKIP|flow-buyer-proof-review-security-owner-judgment|Security owner must judge" in raw
+    assert "STEP_PASS|flow-buyer-proof-review-security-owner-judgment" not in raw
+    assert "flow-buyer-proof-review-security-owner-judgment-failed" not in {finding.id for finding in report.findings}
+    assert "1 skip" in report.evidence[1].observed_behavior
+
+
 def test_manual_evidence_labeled_blocker_fields_override_loose_heuristics(tmp_path: Path):
     evidence = tmp_path / "report.md"
     evidence.write_text(
@@ -724,10 +880,20 @@ def test_customer_report_renders_multidimensional_research_synthesis(tmp_path: P
                                     {"id": "screen", "action": "assert_selector"},
                                     {"id": "outcome", "action": "checkpoint"},
                                 ],
+                            },
+                            {
+                                "name": "Invite teammate",
+                                "start_url": "/settings/team",
+                                "steps": [
+                                    {"id": "screen", "action": "assert_selector"},
+                                ],
                             }
                         ]
                     },
-                    "flows": [{"flow": "Create project", "id": "screen", "passed": True}],
+                    "flows": [
+                        {"flow": "Create project", "id": "screen", "passed": True},
+                        {"flow": "Create project", "id": "outcome", "passed": None, "skipped": True},
+                    ],
                 },
             ),
         ],
@@ -738,7 +904,8 @@ def test_customer_report_renders_multidimensional_research_synthesis(tmp_path: P
     assert "## Customer Journey Notes" in rendered
     assert "- First impression: passed: clear product heading" in rendered
     assert "## Route-By-Route Analysis" in rendered
-    assert "Create project (`/projects`): covered; 1 executable step(s), 1 interpretation checkpoint(s)." in rendered
+    assert "Create project (`/projects`): partially covered; 1 executable step(s), 1 interpretation checkpoint(s)." in rendered
+    assert "Invite teammate (`/settings/team`): not executed; 1 executable step(s), 0 interpretation checkpoint(s)." in rendered
     assert "## Dimension Assessment" in rendered
     assert "- Error recovery: 6/10 — failed: no recovery copy" in rendered
     assert "## Researcher Observations" in rendered

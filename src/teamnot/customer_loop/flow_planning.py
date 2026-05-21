@@ -332,6 +332,8 @@ def _route_from_href(href: str, target: ExperienceTarget) -> str:
         return ""
     parsed_target = urlparse(str(target.url))
     parsed = urlparse(href)
+    if parsed.scheme and parsed.scheme not in {"http", "https"}:
+        return ""
     if parsed.scheme and parsed.netloc and parsed.netloc != parsed_target.netloc:
         return ""
     path = parsed.path or "/"
