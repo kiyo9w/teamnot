@@ -116,28 +116,89 @@ async function currentPage() {
 async function settlePage(p, timeout = 5000) {
   await p.waitForLoadState("domcontentloaded", { timeout }).catch(() => {});
   await p.waitForLoadState("networkidle", { timeout }).catch(() => {});
-  await p.waitForTimeout(500).catch(() => {});
+  await p.waitForFunction(() => {
+    const root = document.querySelector("#root, [data-reactroot], main, body");
+    const text = (root?.innerText || document.body?.innerText || "").trim();
+    return document.readyState !== "loading" && text.length > 0;
+  }, { timeout }).catch(() => {});
+  await p.waitForTimeout(750).catch(() => {});
 }
 
 async function screenshot(p, out, fullPage) {
   await fs.mkdir(path.dirname(out), { recursive: true });
+  let retryCount = 0;
   try {
     await p.screenshot({ path: out, fullPage, timeout: 30000, caret: "hide" });
-    return { path: out, method: "playwright" };
+    return { path: out, method: "playwright", retryCount };
   } catch (err) {
-    const client = await p.context().newCDPSession(p);
-    const capture = await client.send("Page.captureScreenshot", {
-      format: "png",
-      fromSurface: true,
-      captureBeyondViewport: fullPage,
-    });
-    await fs.writeFile(out, Buffer.from(capture.data, "base64"));
+    retryCount += 1;
+    await settlePage(p, 3000);
+    try {
+      await p.screenshot({ path: out, fullPage, timeout: 15000, caret: "hide", animations: "disabled" });
+      return {
+        path: out,
+        method: "playwright-retry",
+        retryCount,
+        fallbackReason: String(err?.message || err).slice(0, 300),
+      };
+    } catch (retryErr) {
+      const client = await p.context().newCDPSession(p);
+      const capture = await client.send("Page.captureScreenshot", {
+        format: "png",
+        fromSurface: true,
+        captureBeyondViewport: fullPage,
+      });
+      await fs.writeFile(out, Buffer.from(capture.data, "base64"));
+      return {
+        path: out,
+        method: "cdp-fallback",
+        retryCount,
+        failedPrimitive: "playwright.screenshot",
+        fallbackReason: String(retryErr?.message || retryErr).slice(0, 300),
+      };
+    }
+  }
+}
+
+async function importStorageState(command) {
+  if (!command.path) throw new Error("Missing path");
+  let parsed;
+  try {
+    parsed = JSON.parse(await fs.readFile(command.path, "utf8"));
+  } catch (err) {
     return {
-      path: out,
-      method: "cdp-fallback",
-      fallbackReason: String(err?.message || err).slice(0, 300),
+      ok: false,
+      action: "importStorageState",
+      cdp,
+      sessionId,
+      unsupportedBlocker: `storageState could not be read safely: ${String(err?.message || err).slice(0, 240)}`,
     };
   }
+  const cookies = Array.isArray(parsed.cookies) ? parsed.cookies : [];
+  if (cookies.length) await context.addCookies(cookies);
+  const origins = Array.isArray(parsed.origins) ? parsed.origins : [];
+  for (const origin of origins) {
+    if (!origin.origin || !Array.isArray(origin.localStorage)) continue;
+    await pGotoOrigin(origin.origin);
+    await page.evaluate((entries) => {
+      for (const entry of entries) localStorage.setItem(entry.name, entry.value);
+    }, origin.localStorage).catch(() => {});
+  }
+  return {
+    ok: true,
+    action: "importStorageState",
+    cdp,
+    sessionId,
+    seededStateApplied: true,
+    cookiesApplied: cookies.length,
+    localStorageOriginsApplied: origins.length,
+    url: page?.url() || "",
+  };
+}
+
+async function pGotoOrigin(origin) {
+  const p = await currentPage();
+  await p.goto(origin, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
 }
 
 async function handle(command) {
@@ -147,18 +208,51 @@ async function handle(command) {
 
   if (action === "status") {
     const pages = browser.contexts().flatMap((ctx) => ctx.pages());
-    return { ok: true, action, cdp, sessionId, dedicatedUrl: p.url(), contexts: browser.contexts().length, pages: pages.length, ensured };
+    return {
+      ok: true,
+      action,
+      cdp,
+      cdpPort: Number(cdpPort()),
+      sessionId,
+      profileDir: userDataDir,
+      dedicatedUrl: p.url(),
+      contexts: browser.contexts().length,
+      pages: pages.length,
+      ensured,
+    };
   }
   if (action === "navigate") {
     if (!command.url) throw new Error("Missing url");
     await p.goto(command.url, { waitUntil: "domcontentloaded", timeout: Number(command.timeout || 30000) });
     await settlePage(p);
-    return { ok: true, action, cdp, sessionId, url: p.url(), title: await p.title().catch(() => ""), ensured };
+    return {
+      ok: true,
+      action,
+      cdp,
+      cdpPort: Number(cdpPort()),
+      sessionId,
+      profileDir: userDataDir,
+      url: p.url(),
+      title: await p.title().catch(() => ""),
+      pages: browser.contexts().flatMap((ctx) => ctx.pages()).length,
+      ensured,
+    };
   }
   if (action === "screenshot") {
     const out = command.out || path.join(process.env.TEMP || "C:\\Windows\\Temp", `teamnot-browser-${Date.now()}.png`);
     const captured = await screenshot(p, out, Boolean(command.fullPage));
-    return { ok: true, action, cdp, sessionId, url: p.url(), title: await p.title().catch(() => ""), ensured, ...captured };
+    return {
+      ok: true,
+      action,
+      cdp,
+      cdpPort: Number(cdpPort()),
+      sessionId,
+      profileDir: userDataDir,
+      url: p.url(),
+      title: await p.title().catch(() => ""),
+      ensured,
+      ...captured,
+    };
   }
   if (action === "viewport") {
     await p.setViewportSize({ width: Number(command.width || 390), height: Number(command.height || 844) });
@@ -187,6 +281,45 @@ async function handle(command) {
         secure: c.secure,
         sameSite: c.sameSite,
       })),
+    };
+  }
+  if (action === "importStorageState") {
+    return await importStorageState(command);
+  }
+  if (action === "setCookies") {
+    const cookies = Array.isArray(command.cookies) ? command.cookies : [];
+    if (!cookies.length) {
+      return { ok: false, action, cdp, sessionId, unsupportedBlocker: "No cookies were provided." };
+    }
+    await context.addCookies(cookies);
+    return { ok: true, action, cdp, sessionId, seededStateApplied: true, cookiesApplied: cookies.length, url: p.url() };
+  }
+  if (action === "setLocalStorage") {
+    const entries = Array.isArray(command.entries) ? command.entries : [];
+    let applied = 0;
+    for (const entry of entries) {
+      if (!entry.origin || !entry.values || typeof entry.values !== "object") continue;
+      await p.goto(entry.origin, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
+      await p.evaluate((values) => {
+        for (const [key, value] of Object.entries(values)) localStorage.setItem(key, String(value));
+      }, entry.values).catch(() => {});
+      applied += Object.keys(entry.values).length;
+    }
+    return { ok: true, action, cdp, sessionId, seededStateApplied: applied > 0, localStorageValuesApplied: applied, url: p.url() };
+  }
+  if (action === "loginHint") {
+    return {
+      ok: true,
+      action,
+      cdp,
+      sessionId,
+      seededStateApplied: false,
+      loginHintRecorded: true,
+      email: command.email || "",
+      loginUrl: command.loginUrl || "",
+      workspaceId: command.workspaceId || "",
+      unsupportedBlocker: "loginHint records account metadata only; automated credential entry is intentionally not performed.",
+      url: p.url(),
     };
   }
   if (action === "eval") {

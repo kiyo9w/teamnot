@@ -6,7 +6,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, HttpUrl, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 
 class CustomerLoopError(Exception):
@@ -151,6 +151,171 @@ class ProductExplorationPlan(BaseModel):
     notes: str = ""
 
 
+class SeededTestAccount(BaseModel):
+    email: str = ""
+    password: str = Field(default="", repr=False)
+    login_url: str = ""
+    workspace_id: str = ""
+    notes: str = ""
+
+    def redacted(self) -> dict[str, Any]:
+        data = self.model_dump(mode="json")
+        if data.get("password"):
+            data["password"] = "***REDACTED***"
+        return data
+
+
+class SeededCookie(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str
+    value: str = Field(default="", repr=False)
+    domain: str = ""
+    path: str = "/"
+    expires: float | None = None
+    http_only: bool | None = Field(default=None, alias="httpOnly")
+    secure: bool | None = None
+    same_site: str | None = Field(default=None, alias="sameSite")
+
+    def redacted(self) -> dict[str, Any]:
+        data = self.model_dump(mode="json")
+        if data.get("value"):
+            data["value"] = "***REDACTED***"
+        return data
+
+
+class SeededLocalStorageEntry(BaseModel):
+    origin: str = ""
+    values: dict[str, str] = Field(default_factory=dict)
+
+    def redacted(self) -> dict[str, Any]:
+        return {
+            "origin": self.origin,
+            "values": {key: "***REDACTED***" for key in self.values},
+        }
+
+
+class SeededCustomerState(BaseModel):
+    storage_state_path: Path | None = None
+    cookies: list[SeededCookie] = Field(default_factory=list)
+    local_storage: list[SeededLocalStorageEntry] = Field(default_factory=list)
+    test_account: SeededTestAccount | None = None
+    login_url: str = ""
+    cleanup_notes: str = ""
+    reset_notes: str = ""
+    workspace_id: str = ""
+    safety_constraints: list[str] = Field(default_factory=list)
+    adapter_status: str = "not_attempted"
+    unsupported_blocker: str = ""
+
+    def redacted(self) -> dict[str, Any]:
+        data = self.model_dump(mode="json", exclude={"cookies", "local_storage", "test_account"})
+        data["cookies"] = [cookie.redacted() for cookie in self.cookies]
+        data["local_storage"] = [entry.redacted() for entry in self.local_storage]
+        data["test_account"] = self.test_account.redacted() if self.test_account else None
+        return data
+
+
+class BrowserRuntimeMetadata(BaseModel):
+    cdp_url: str = ""
+    cdp_port: int | None = None
+    session_id: str = ""
+    profile_dir: str = ""
+    page_url: str = ""
+    target_id: str = ""
+    page_count: int | None = None
+    pinned_target: str = ""
+    screenshot_method: str = ""
+    failed_primitive: str = ""
+    adapter_blocker: str = ""
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class ScreenshotCaptureRecord(BaseModel):
+    path: str = ""
+    route: str = ""
+    action: str = ""
+    method: str = ""
+    retry_count: int = 0
+    failed_primitive: str = ""
+    fallback_reason: str = ""
+    success: bool = False
+    width: int | None = None
+    height: int | None = None
+    sha256: str = ""
+
+
+class VisionScreenshotGroup(BaseModel):
+    group_id: str
+    screenshots: list[ScreenshotCaptureRecord] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class VisionReviewArtifact(BaseModel):
+    review_kind: str = "metadata_only"
+    evidence_source: str = "screenshot metadata and hashes"
+    screenshot_count: int = 0
+    groups: list[VisionScreenshotGroup] = Field(default_factory=list)
+    heuristics: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    judgment_summary: str = "Deterministic baseline collected visual metadata only; no model visual judgment was performed."
+
+
+class JTBDForces(BaseModel):
+    push: str = ""
+    pull: str = ""
+    anxiety: str = ""
+    habit: str = ""
+    trigger: str = ""
+    success_metric: str = ""
+
+
+class PersonaLensResult(BaseModel):
+    lens: str
+    role: str = ""
+    positive_signals: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    conflicts: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+
+
+class DomainOutputOracle(BaseModel):
+    name: str = "Domain output oracle"
+    expected_output: str = ""
+    golden_file: Path | None = None
+    api_check: str = ""
+    semantic_rubric: str = ""
+    manual_checkpoint: str = ""
+    coverage_status: str = "not_evaluated"
+    notes: str = ""
+
+
+class ResearchActionMemory(BaseModel):
+    route: str = ""
+    observation: str = ""
+    chosen_action: str = ""
+    reason: str = ""
+    expected_signal: str = ""
+    result: str = ""
+    comparison: str = ""
+    learned_signal: str = ""
+    repeated: bool = False
+    no_op: bool = False
+
+
+class IterationCoverage(BaseModel):
+    iteration: int = 1
+    stop_reason: str = ""
+    selected_finding_id: str | None = None
+    new_routes: list[str] = Field(default_factory=list)
+    new_actions: list[str] = Field(default_factory=list)
+    new_screenshots: list[str] = Field(default_factory=list)
+    new_findings: list[str] = Field(default_factory=list)
+    replayed: bool = False
+    new_evidence: bool = False
+    teamnot_invoked: bool = False
+
+
 class CustomerEvidence(BaseModel):
     kind: str = "manual_report"
     path: str = ""
@@ -158,6 +323,7 @@ class CustomerEvidence(BaseModel):
     observed_behavior: str = ""
     raw_excerpt: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
+    screenshot_captures: list[ScreenshotCaptureRecord] = Field(default_factory=list)
 
 
 class CustomerFinding(BaseModel):
@@ -199,6 +365,14 @@ class CustomerReport(BaseModel):
     summary: str = ""
     raw_report_path: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    seeded_state: SeededCustomerState | None = None
+    browser_runtime: BrowserRuntimeMetadata | None = None
+    screenshot_captures: list[ScreenshotCaptureRecord] = Field(default_factory=list)
+    vision_review: VisionReviewArtifact | None = None
+    persona_lenses: list[PersonaLensResult] = Field(default_factory=list)
+    jtbd_forces: JTBDForces | None = None
+    domain_oracles: list[DomainOutputOracle] = Field(default_factory=list)
+    action_memory: list[ResearchActionMemory] = Field(default_factory=list)
 
 
 class GeneratedBrief(BaseModel):
@@ -222,6 +396,9 @@ class CustomerLoopConfig(BaseModel):
     flow_path: Path | None = None
     file_fixture_path: Path | None = None
     seeded_state_path: Path | None = None
+    seeded_state: SeededCustomerState | None = None
+    domain_oracle_path: Path | None = None
+    domain_oracles: list[DomainOutputOracle] = Field(default_factory=list)
 
 
 class CustomerLoopResult(BaseModel):
@@ -233,3 +410,4 @@ class CustomerLoopResult(BaseModel):
     iterations_completed: int = 1
     teamnot_invoked: bool = False
     iteration_out_dirs: list[Path] = Field(default_factory=list)
+    iteration_coverage: list[IterationCoverage] = Field(default_factory=list)

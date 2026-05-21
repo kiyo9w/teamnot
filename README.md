@@ -65,7 +65,10 @@ won't do (overspend, push to `main`, deploy, leak secrets).
   `.teamnot/customer-loop/` artifacts, choose the next best customer-impact
   move, and generate a follow-up TeamNoT brief. Browser evidence supports both
   deterministic readiness probes, an opt-in sample/demo interactive runner, and
-  generated or configured multi-journey browser flow packs. See
+  generated or configured multi-journey browser flow packs, plus seeded
+  account/state contracts, screenshot capture metadata, deterministic vision
+  review artifacts, and iteration coverage. It does not claim model visual
+  judgment unless a future vision worker explicitly provides it. See
   [docs/customer-loop.md](docs/customer-loop.md).
 - 📜 **Project Brief Contract** — single `.teamnot/brief.yaml` carries the
   whole job: project, task, Definition of Done, deliverable, budget, allowed

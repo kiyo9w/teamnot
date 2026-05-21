@@ -60,6 +60,8 @@ Generate a follow-up brief from the customer report:
 teamnot customer-loop \
   --target https://example-product.test \
   --profile .teamnot/customer-loop/shopify-agency-ops.yaml \
+  --seeded-state .teamnot/customer-loop/seeded-state.yaml \
+  --domain-oracle .teamnot/customer-loop/domain-oracle.yaml \
   --evidence .teamnot/customer-testing/report.md \
   --runner manual \
   --out .teamnot/customer-loop/run-001 \
@@ -128,6 +130,8 @@ Run a full inspected customer session:
 teamnot customer-flow-session \
   --target https://example-product.test \
   --profile .teamnot/customer-loop/customer.yaml \
+  --seeded-state .teamnot/customer-loop/seeded-state.yaml \
+  --domain-oracle .teamnot/customer-loop/domain-oracle.yaml \
   --out .teamnot/customer-loop/session-001
 ```
 
@@ -139,6 +143,80 @@ convert unresolved TODO/external-risky actions into a safer
 report, and emit `flow_refinement_report.md`. External downloads, installers,
 login, checkout, claim-offer, and account actions are verified as visible
 links/text unless a human-approved flow explicitly models the click.
+
+## Seeded State
+
+Authenticated apps need an explicit state contract. Pass `--seeded-state` to
+`customer-test`, `customer-flow-session`, or `customer-loop`:
+
+```yaml
+storage_state_path: .teamnot/customer-loop/storage-state.json
+cookies:
+  - name: session
+    value: replace-in-local-fixture
+    domain: 127.0.0.1
+    path: /
+local_storage:
+  - origin: http://127.0.0.1:3000
+    values:
+      workspace: demo-workspace
+test_account:
+  email: customer@example.test
+  password: replace-in-local-fixture
+  login_url: http://127.0.0.1:3000/auth/login
+  workspace_id: demo-workspace
+cleanup_notes: Reset the demo workspace after each run.
+reset_notes: Delete generated records before reusing the account.
+workspace_id: demo-workspace
+safety_constraints:
+  - Use test data only.
+  - Do not touch production billing or irreversible actions.
+```
+
+Artifacts write `seeded_state_metadata.yaml` with passwords, cookies, and
+localStorage values redacted. Browser-capable adapters report whether state was
+`applied`, `metadata_only`, or `unsupported`; unsupported adapter behavior is a
+blocker in the artifact, not hidden as authenticated coverage. The Windows CDP
+session can apply cookies/localStorage and can attempt a Playwright
+`storageState` import. Login hints record account metadata only; TeamNoT does
+not type passwords into a product unless a project-specific flow explicitly
+models that action.
+
+## Domain Oracles
+
+Use `--domain-oracle` when output correctness matters:
+
+```yaml
+oracles:
+  - name: CSV preflight report
+    expected_output: prioritized import blockers
+    golden_file: fixtures/expected-report.md
+    api_check: GET /api/reports/latest
+    semantic_rubric: Report must separate hard blockers from warnings.
+    manual_checkpoint: Confirm the downloaded report matches the on-screen summary.
+```
+
+If no oracle is provided, the report records a coverage gap. Generic DOM and UI
+evidence can prove interaction and trust cues; it cannot prove that a report,
+invoice, recommendation, import result, or generated artifact is domain-correct.
+
+## Screenshot And Vision Review
+
+Browser runs write:
+
+- `browser_runtime.yaml` with CDP URL/port, session id, profile/page details,
+  screenshot method, and adapter blockers.
+- `screenshot_captures.yaml` with one record per capture attempt, including
+  route/action, method, retry/fallback metadata, success, hash, and dimensions
+  when available.
+- `vision_review.yaml` with deterministic screenshot grouping, hash-change
+  heuristics, missing/blank capture blockers, and a `review_kind`.
+
+The default reviewer is local and deterministic. It collects visual metadata and
+hash-level change signals only. Reports distinguish DOM/text evidence, visual
+metadata, heuristic screenshot health, and model visual judgment. Today the
+default is not model vision; a future subscription/local worker can plug into
+the same boundary and must label its evidence as visual judgment.
 
 ## Artifacts
 
@@ -155,6 +233,14 @@ directory, commonly `.teamnot/customer-loop/<run-id>/`:
 - `flow_refinement_report.md`
 - `generated_brief.yaml`
 - `loop_summary.md`
+- `seeded_state_metadata.yaml`
+- `browser_runtime.yaml`
+- `screenshot_captures.yaml`
+- `vision_review.yaml`
+- `persona_jtbd_panel.yaml`
+- `domain_oracles.yaml`
+- `research_action_memory.yaml`
+- `iteration_coverage.yaml`
 - `screenshots/`
 
 When evaluating another project, put `--out` under that project so browser
@@ -178,6 +264,14 @@ adoption and commercial cues, domain fit, time-to-value, recommendation clarity,
 mobile review, accessibility basics, layout overflow, resource health, JTBD
 forces, buyer/user mismatch, and emotional confidence. Tests mock command
 execution and do not require a real browser.
+
+`OpenClawWindowsResearcherRunner` is the broad autonomous customer-research lane.
+It keeps a persistent Windows Chrome/CDP session, explores visible routes,
+observes each screen, chooses customer/product actions over navigation/footer
+links, records why each branch was chosen, suppresses repeated no-op actions,
+captures before/after screenshots, and writes `research_brain.yaml`. Seeded
+state lets this runner reach authenticated dashboards, records, settings, team
+invites, billing, and saved state when the adapter can apply the fixture.
 
 Full task-specific flows such as uploading a real file, completing checkout,
 onboarding, inviting teammates, changing settings, or testing an authenticated
@@ -215,3 +309,15 @@ finding, precise required behavior, non-goals, safety constraints, and
 machine-verifiable DoD such as `pytest -q` and `ruff check .`. It keeps budget
 defaults safe by disallowing metered workers unless a later brief explicitly
 opts in.
+
+## Readiness Classification
+
+Final customer-loop validation should classify the result honestly:
+
+- `production feature`: deterministic tests pass, browser dogfood succeeds on a
+  representative app, seeded/domain/vision artifacts are complete for the target
+  claim, and no customer-critical blocker remains.
+- `beta/internal dogfood`: the core loop and artifacts work, but browser,
+  seeded-state, vision, or multi-target coverage still needs more hardening.
+- `blocked`: evidence collection, artifact honesty, or repeat-loop behavior is
+  unreliable enough that TeamNoT should not claim autonomous customer research.

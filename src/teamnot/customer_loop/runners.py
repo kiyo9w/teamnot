@@ -22,6 +22,7 @@ from teamnot.customer_loop.flow_planning import (
 )
 from teamnot.customer_loop.io import save_yaml
 from teamnot.customer_loop.models import (
+    BrowserRuntimeMetadata,
     CustomerEvidence,
     CustomerFinding,
     CustomerFlow,
@@ -36,7 +37,18 @@ from teamnot.customer_loop.models import (
     ExperienceTarget,
     ProductExplorationPlan,
     ProductRoute,
+    ResearchActionMemory,
+    ScreenshotCaptureRecord,
+    SeededCustomerState,
 )
+from teamnot.customer_loop.research_planning import (
+    action_memory_from_result,
+    rank_customer_actions,
+    suppress_repeated_noops,
+    synthesize_jtbd_forces,
+    synthesize_persona_panel,
+)
+from teamnot.customer_loop.vision import DeterministicScreenshotReviewer
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
@@ -135,6 +147,16 @@ class PersistentWinBrowserCommandRunner:
         elif action == "screenshot":
             payload["out"] = _arg_value(args, "--out")
             payload["fullPage"] = "--full-page" in args
+        elif action == "importStorageState":
+            payload["path"] = _arg_value(args, "--path")
+        elif action == "setCookies":
+            payload["cookies"] = _json_arg(args, "--cookies", [])
+        elif action == "setLocalStorage":
+            payload["entries"] = _json_arg(args, "--entries", [])
+        elif action == "loginHint":
+            payload["email"] = _arg_value(args, "--email")
+            payload["loginUrl"] = _arg_value(args, "--login-url")
+            payload["workspaceId"] = _arg_value(args, "--workspace-id")
         elif action == "viewport":
             payload["width"] = int(_arg_value(args, "--width", "390") or "390")
             payload["height"] = int(_arg_value(args, "--height", "844") or "844")
@@ -228,10 +250,15 @@ class OpenClawWindowsCDPRunner:
         result = probe.get("result", probe)
         mobile_viewport = self._try_run(["--action", "viewport", "--width", "390", "--height", "844"])
         mobile_probe = _parse_json_stdout(self._run(["--action", "eval", "--expr", _MOBILE_PROBE_JS])).get("result", {})
+        screenshot_records = [
+            self._try_screenshot_record(first_impression, first_impression_out, route="/", action="first_impression"),
+            self._try_screenshot_record(full_page, full_page_out, full_page=True, route="/", action="full_page"),
+            self._try_screenshot_record(mobile_review, mobile_review_out, route="/", action="mobile_review"),
+        ]
         screenshot_status = {
-            "first_impression": self._try_screenshot(first_impression, first_impression_out),
-            "full_page": self._try_screenshot(full_page, full_page_out, full_page=True),
-            "mobile_review": self._try_screenshot(mobile_review, mobile_review_out),
+            "first_impression": screenshot_records[0].model_dump(mode="json"),
+            "full_page": screenshot_records[1].model_dump(mode="json"),
+            "mobile_review": screenshot_records[2].model_dump(mode="json"),
         }
         if isinstance(mobile_probe, dict):
             result["mobileProbe"] = mobile_probe
@@ -247,6 +274,7 @@ class OpenClawWindowsCDPRunner:
             screenshot_paths=[str(first_impression), str(full_page), str(mobile_review)],
             observed_behavior=_summarize_probe(result, markers),
             raw_excerpt="\n".join(markers),
+            screenshot_captures=screenshot_records,
             metadata={
                 "runner": "openclaw-windows-cdp",
                 "rubric": "customer-testing-openclaw",
@@ -265,7 +293,7 @@ class OpenClawWindowsCDPRunner:
         )
         for finding in findings:
             finding.evidence.append(evidence)
-        return CustomerReport(
+        report = CustomerReport(
             profile=profile,
             target=target,
             plan=plan,
@@ -276,20 +304,48 @@ class OpenClawWindowsCDPRunner:
                 "Customer-testing-openclaw browser test completed with Windows CDP. "
                 f"{len(findings)} customer-impact finding(s) identified."
             ),
+            browser_runtime=_runtime_from_response(navigate),
+            screenshot_captures=screenshot_records,
+            vision_review=DeterministicScreenshotReviewer().review(screenshot_records),
         )
+        _attach_customer_panels(report)
+        return report
 
     def _screenshot(self, path: Path) -> None:
         self._run(["--action", "screenshot", "--out", _path_for_windows_wrapper(path)])
 
     def _try_screenshot(self, path: Path, out: str | None = None, full_page: bool = False) -> bool:
+        return self._try_screenshot_record(path, out=out, full_page=full_page).success
+
+    def _try_screenshot_record(
+        self,
+        path: Path,
+        out: str | None = None,
+        full_page: bool = False,
+        route: str = "",
+        action: str = "",
+    ) -> ScreenshotCaptureRecord:
         args = ["--action", "screenshot", "--out", out or _path_for_windows_wrapper(path)]
         if full_page:
             args.append("--full-page")
+        parsed: dict = {}
+        failed = ""
         try:
-            self._run(args)
-        except CustomerLoopRunnerError:
-            return False
-        return path.exists()
+            parsed = _parse_json_stdout(self._run(args))
+        except CustomerLoopRunnerError as exc:
+            failed = str(exc)
+        success = path.exists()
+        return ScreenshotCaptureRecord(
+            path=str(path),
+            route=route,
+            action=action,
+            method=str(parsed.get("method", "playwright" if success else "")),
+            retry_count=int(parsed.get("retryCount", 0) or parsed.get("retry_count", 0) or 0),
+            failed_primitive="screenshot" if failed else str(parsed.get("failedPrimitive", "")),
+            fallback_reason=str(parsed.get("fallbackReason", "")),
+            success=success,
+            sha256=_file_sha256(path),
+        )
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         command = [str(self.wrapper_path), *args]
@@ -366,11 +422,13 @@ class OpenClawWindowsInteractiveRunner(OpenClawWindowsCDPRunner):
         before = screenshots / "interactive-before.png"
         after = screenshots / "interactive-after.png"
         self._try_run(["--action", "viewport", "--width", "1280", "--height", "900"])
-        before_screenshot_ok = self._try_screenshot(before)
+        before_record = self._try_screenshot_record(before, route="/", action="interactive-before")
+        before_screenshot_ok = before_record.success
         interaction = _parse_json_stdout(
             self._run(["--action", "eval", "--expr", _INTERACTIVE_SAMPLE_FLOW_JS])
         ).get("result", {})
-        after_screenshot_ok = self._try_screenshot(after)
+        after_record = self._try_screenshot_record(after, route="/", action="interactive-after")
+        after_screenshot_ok = after_record.success
         markers, findings = _build_interactive_findings(interaction if isinstance(interaction, dict) else {})
         evidence = CustomerEvidence(
             kind="browser_interaction",
@@ -378,6 +436,7 @@ class OpenClawWindowsInteractiveRunner(OpenClawWindowsCDPRunner):
             screenshot_paths=[str(before), str(after)],
             observed_behavior=_summarize_interaction(interaction if isinstance(interaction, dict) else {}, markers),
             raw_excerpt="\n".join(markers),
+            screenshot_captures=[before_record, after_record],
             metadata={
                 "runner": "openclaw-windows-interactive",
                 "rubric": "customer-testing-openclaw",
@@ -393,6 +452,10 @@ class OpenClawWindowsInteractiveRunner(OpenClawWindowsCDPRunner):
         for finding in findings:
             finding.evidence.append(evidence)
         report.findings.extend(findings)
+        captures = _collect_screenshot_captures(report)
+        report.screenshot_captures = captures
+        report.vision_review = DeterministicScreenshotReviewer().review(captures)
+        _attach_customer_panels(report)
         report.scores = _score_customer_readiness(
             report.evidence[0].metadata.get("probe", {}) if report.evidence else {},
             report.findings,
@@ -436,6 +499,7 @@ class OpenClawWindowsFlowRunner(OpenClawWindowsInteractiveRunner):
         findings: list[CustomerFinding] = []
         flow_results: list[dict] = []
         screenshot_paths: list[str] = []
+        screenshot_captures: list[ScreenshotCaptureRecord] = []
         for flow_index, flow in enumerate(self.flow_pack.flows, start=1):
             flow_slug = _slug(flow.name)
             if self.flow_pack.reset_between_flows or flow.start_url:
@@ -462,9 +526,12 @@ class OpenClawWindowsFlowRunner(OpenClawWindowsInteractiveRunner):
                     }
                 flow_results.append({"flow": flow.name, **result})
                 shot = screenshots / f"flow-{flow_index:02d}-{step_index:02d}-{flow_slug}-{_slug(step.id)}.png"
-                screenshot_ok = self._try_screenshot(shot)
+                screenshot_record = self._try_screenshot_record(shot, route=flow.start_url, action=step.id)
+                screenshot_ok = screenshot_record.success
                 result["screenshot_ok"] = screenshot_ok
+                result["screenshot_capture"] = screenshot_record.model_dump(mode="json")
                 screenshot_paths.append(str(shot))
+                screenshot_captures.append(screenshot_record)
                 marker_id = f"flow-{flow_slug}-{step.id}"
                 if result.get("passed"):
                     markers.append(f"STEP_PASS|{marker_id}|{result.get('summary', step.action)}")
@@ -490,6 +557,7 @@ class OpenClawWindowsFlowRunner(OpenClawWindowsInteractiveRunner):
             screenshot_paths=screenshot_paths,
             observed_behavior=_summarize_flow_pack(self.flow_pack, markers),
             raw_excerpt="\n".join(markers),
+            screenshot_captures=screenshot_captures,
             metadata={
                 "runner": "openclaw-windows-flow",
                 "rubric": "customer-testing-openclaw",
@@ -502,6 +570,10 @@ class OpenClawWindowsFlowRunner(OpenClawWindowsInteractiveRunner):
         for finding in findings:
             finding.evidence.append(evidence)
         report.findings.extend(findings)
+        captures = _collect_screenshot_captures(report)
+        report.screenshot_captures = captures
+        report.vision_review = DeterministicScreenshotReviewer().review(captures)
+        _attach_customer_panels(report)
         report.scores = _score_customer_readiness(
             report.evidence[0].metadata.get("probe", {}) if report.evidence else {},
             report.findings,
@@ -623,6 +695,10 @@ class OpenClawWindowsSessionRunner(OpenClawWindowsCDPRunner):
             for finding in screen_findings:
                 finding.evidence.append(screen_evidence)
             report.findings.extend(screen_findings)
+            captures = _collect_screenshot_captures(report)
+            report.screenshot_captures = captures
+            report.vision_review = DeterministicScreenshotReviewer().review(captures)
+            _attach_customer_panels(report)
             (out_dir / "flow_refinement_report.md").write_text(
                 render_flow_refinement_report(inspected, runnable, report),
                 encoding="utf-8",
@@ -670,7 +746,8 @@ class OpenClawWindowsSessionRunner(OpenClawWindowsCDPRunner):
                 })
                 continue
             entry_shot = screenshots / f"route-{route_index:02d}-{_slug(route)}-entry.png"
-            entry_screenshot_ok = self._try_screenshot_for_exploration(entry_shot)
+            entry_record = self._capture_screenshot_for_exploration(entry_shot, route=route, action="entry")
+            entry_screenshot_ok = entry_record.success
             entry_hash = _file_sha256(entry_shot)
             candidates_raw = _parse_json_stdout(
                 self._run(["--action", "eval", "--expr", _SCREEN_ACTION_DISCOVERY_JS])
@@ -695,7 +772,12 @@ class OpenClawWindowsSessionRunner(OpenClawWindowsCDPRunner):
                     self._parse_or_reset_navigation(target, route)
                 except CustomerLoopRunnerError:
                     pass
-                before_screenshot_ok = self._try_screenshot_for_exploration(before_shot)
+                before_record = self._capture_screenshot_for_exploration(
+                    before_shot,
+                    route=route,
+                    action=f"{candidate.get('text', '') or candidate.get('selector', 'action')}-before",
+                )
+                before_screenshot_ok = before_record.success
                 before_hash = _file_sha256(before_shot)
                 try:
                     click_result = _parse_json_stdout(
@@ -710,7 +792,12 @@ class OpenClawWindowsSessionRunner(OpenClawWindowsCDPRunner):
                         "beforeTextSample": "",
                         "afterTextSample": "",
                     }
-                after_screenshot_ok = self._try_screenshot_for_exploration(after_shot)
+                after_record = self._capture_screenshot_for_exploration(
+                    after_shot,
+                    route=route,
+                    action=f"{candidate.get('text', '') or candidate.get('selector', 'action')}-after",
+                )
+                after_screenshot_ok = after_record.success
                 after_hash = _file_sha256(after_shot)
                 if not isinstance(click_result, dict):
                     click_result = {"ok": False, "summary": "screen action returned non-object result"}
@@ -733,6 +820,10 @@ class OpenClawWindowsSessionRunner(OpenClawWindowsCDPRunner):
                     "after_screenshot_ok": after_screenshot_ok,
                     "before_hash": before_hash,
                     "after_hash": after_hash,
+                    "screenshot_captures": [
+                        before_record.model_dump(mode="json"),
+                        after_record.model_dump(mode="json"),
+                    ],
                     "result": click_result,
                 })
             route_results.append({
@@ -741,6 +832,7 @@ class OpenClawWindowsSessionRunner(OpenClawWindowsCDPRunner):
                 "navigate": navigate,
                 "entry_screenshot": str(entry_shot),
                 "entry_screenshot_ok": entry_screenshot_ok,
+                "entry_screenshot_capture": entry_record.model_dump(mode="json"),
                 "entry_hash": entry_hash,
                 "visible_action_count": len(candidates),
                 "safe_action_count": len(safe_candidates),
@@ -759,11 +851,24 @@ class OpenClawWindowsSessionRunner(OpenClawWindowsCDPRunner):
         return _parse_json_stdout(self._run(["--action", "navigate", "--url", _flow_url(target, route)]))
 
     def _try_screenshot_for_exploration(self, path: Path) -> bool:
+        return self._capture_screenshot_for_exploration(path).success
+
+    def _capture_screenshot_for_exploration(
+        self,
+        path: Path,
+        route: str = "",
+        action: str = "",
+    ) -> ScreenshotCaptureRecord:
         try:
-            self._screenshot(path)
+            return self._try_screenshot_record(path, route=route, action=action)
         except CustomerLoopRunnerError:
-            return False
-        return path.exists()
+            return ScreenshotCaptureRecord(
+                path=str(path),
+                route=route,
+                action=action,
+                failed_primitive="screenshot",
+                success=False,
+            )
 
 
 class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
@@ -775,6 +880,7 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
         command_runner: CommandRunner | None = None,
         file_fixture_path: str | Path | None = None,
         seeded_state_path: str | Path | None = None,
+        seeded_state: SeededCustomerState | None = None,
     ):
         super().__init__(
             wrapper_path=wrapper_path,
@@ -782,6 +888,7 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
             file_fixture_path=file_fixture_path,
         )
         self.seeded_state_path = Path(seeded_state_path).expanduser() if seeded_state_path else None
+        self.seeded_state = seeded_state
 
     def run(
         self,
@@ -791,10 +898,14 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
         out_dir: Path,
     ) -> CustomerReport:
         try:
+            seeded_state = self._seeded_state_contract()
+            seeded_state_result = self._apply_seeded_state(target, seeded_state) if seeded_state else None
             exploration = _safe_explore_product(target, profile, self.wrapper_path, self.command_runner)
             planned_routes = routes_from_exploration(exploration, max_routes=9)
             screen_exploration = self._explore_screens(target, planned_routes, out_dir)
-            research_brain = self._research_brain_pass(target, profile, planned_routes, out_dir)
+            research_brain = self._research_brain_pass(target, profile, planned_routes, out_dir, seeded_state)
+            if seeded_state_result:
+                research_brain["seeded_state_application"] = seeded_state_result
             routes_for_flow = _dedupe_strings([
                 *planned_routes,
                 *screen_exploration.get("routes_discovered", []),
@@ -841,6 +952,17 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
                 for finding in findings:
                     finding.evidence.append(evidence)
                 report.findings.extend(findings)
+            report.seeded_state = seeded_state
+            report.action_memory = [
+                ResearchActionMemory.model_validate(item)
+                for item in research_brain.get("action_memory", [])
+                if isinstance(item, dict)
+            ]
+            captures = _collect_screenshot_captures(report)
+            report.screenshot_captures = captures
+            report.vision_review = DeterministicScreenshotReviewer().review(captures)
+            report.browser_runtime = _merge_runtime(report.browser_runtime, research_brain.get("browser_runtime"))
+            _attach_customer_panels(report)
             (out_dir / "flow_refinement_report.md").write_text(
                 render_flow_refinement_report(inspected, runnable, report),
                 encoding="utf-8",
@@ -861,6 +983,7 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
         profile: CustomerProfile,
         routes: list[str],
         out_dir: Path,
+        seeded_state: SeededCustomerState | None = None,
     ) -> dict:
         screenshots = out_dir / "screenshots" / "research-brain"
         screenshots.mkdir(parents=True, exist_ok=True)
@@ -869,6 +992,8 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
         route_results: list[dict] = []
         discovered_routes = set(routes)
         hypotheses = _research_hypotheses(profile)
+        action_memory: list[ResearchActionMemory] = []
+        browser_runtime: BrowserRuntimeMetadata | None = None
         self._try_run(["--action", "viewport", "--width", "1280", "--height", "900"])
         for route_index, route in enumerate(routes[:6], start=1):
             if actions_used >= action_budget:
@@ -876,6 +1001,7 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
             route_url = _flow_url(target, route)
             try:
                 navigate = _parse_json_stdout(self._run(["--action", "navigate", "--url", route_url]))
+                browser_runtime = _merge_runtime(browser_runtime, navigate)
                 observation = _parse_json_stdout(
                     self._run(["--action", "eval", "--expr", _RESEARCH_OBSERVE_JS])
                 ).get("result", {})
@@ -894,8 +1020,13 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
             if not isinstance(observation, dict):
                 observation = {}
             entry_shot = screenshots / f"route-{route_index:02d}-{_slug(route)}-observe.png"
-            entry_screenshot_ok = self._try_screenshot_for_exploration(entry_shot)
-            planned_actions = _research_actions_from_observation(observation, target)
+            entry_record = self._capture_screenshot_for_exploration(entry_shot, route=route, action="observe")
+            entry_screenshot_ok = entry_record.success
+            planned_actions = suppress_repeated_noops(
+                route,
+                _research_actions_from_observation(observation, target),
+                action_memory,
+            )
             action_results: list[dict] = []
             for action_index, action in enumerate(planned_actions[:5], start=1):
                 if actions_used >= action_budget:
@@ -911,7 +1042,12 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
                     self._parse_or_reset_navigation(target, route)
                 except CustomerLoopRunnerError:
                     pass
-                before_screenshot_ok = self._try_screenshot_for_exploration(before_shot)
+                before_record = self._capture_screenshot_for_exploration(
+                    before_shot,
+                    route=route,
+                    action=f"{action.get('id', 'action')}-before",
+                )
+                before_screenshot_ok = before_record.success
                 before_hash = _file_sha256(before_shot)
                 try:
                     result = _parse_json_stdout(
@@ -926,14 +1062,19 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
                         "beforeTextSample": "",
                         "afterTextSample": "",
                     }
-                after_screenshot_ok = self._try_screenshot_for_exploration(after_shot)
+                after_record = self._capture_screenshot_for_exploration(
+                    after_shot,
+                    route=route,
+                    action=f"{action.get('id', 'action')}-after",
+                )
+                after_screenshot_ok = after_record.success
                 after_hash = _file_sha256(after_shot)
                 if not isinstance(result, dict):
                     result = {"ok": False, "summary": "research action returned non-object result"}
                 route_after = _route_from_url(str(result.get("afterUrl", "")), target)
                 if route_after:
                     discovered_routes.add(route_after)
-                action_results.append({
+                action_result = {
                     "action": action,
                     "passed": bool(result.get("ok")),
                     "url_changed": result.get("beforeUrl") != result.get("afterUrl"),
@@ -943,8 +1084,14 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
                     "after_screenshot": str(after_shot),
                     "before_screenshot_ok": before_screenshot_ok,
                     "after_screenshot_ok": after_screenshot_ok,
+                    "screenshot_captures": [
+                        before_record.model_dump(mode="json"),
+                        after_record.model_dump(mode="json"),
+                    ],
                     "result": result,
-                })
+                }
+                action_results.append(action_result)
+                action_memory.append(action_memory_from_result(route, str(observation), action, action_result))
             route_results.append({
                 "route": route,
                 "url": route_url,
@@ -952,6 +1099,7 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
                 "observation": observation,
                 "entry_screenshot": str(entry_shot),
                 "entry_screenshot_ok": entry_screenshot_ok,
+                "entry_screenshot_capture": entry_record.model_dump(mode="json"),
                 "planned_actions": planned_actions,
                 "actions": action_results,
             })
@@ -959,9 +1107,12 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
             "method": "agentic customer researcher loop using Windows CDP observations, planned branches, realistic form fills, and before/after evidence",
             "seeded_state_path": str(self.seeded_state_path) if self.seeded_state_path else "",
             "state_policy": (
-                "seeded account/state available" if self.seeded_state_path else
+                "seeded account/state available" if seeded_state else
                 "no seeded account/state provided; authenticated product depth remains a coverage gap"
             ),
+            "seeded_state_status": seeded_state.adapter_status if seeded_state else "absent",
+            "browser_runtime": browser_runtime.model_dump(mode="json") if browser_runtime else {},
+            "action_memory": [item.model_dump(mode="json") for item in action_memory],
             "hypotheses": hypotheses,
             "routes_seeded": routes,
             "routes_discovered": sorted(discovered_routes),
@@ -969,6 +1120,62 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
             "actions_executed": actions_used,
             "routes": route_results,
         }
+
+    def _seeded_state_contract(self) -> SeededCustomerState | None:
+        if self.seeded_state:
+            return self.seeded_state
+        if self.seeded_state_path:
+            from teamnot.customer_loop.io import load_seeded_state
+
+            state = load_seeded_state(self.seeded_state_path)
+            if state.storage_state_path and not state.storage_state_path.is_absolute():
+                state.storage_state_path = (self.seeded_state_path.parent / state.storage_state_path).resolve()
+            return state
+        return None
+
+    def _apply_seeded_state(self, target: ExperienceTarget, seeded_state: SeededCustomerState) -> dict:
+        results: list[dict] = []
+        status = "unsupported"
+        blocker = ""
+        if seeded_state.storage_state_path:
+            results.append(self._try_seed_command([
+                "--action", "importStorageState",
+                "--path", _path_for_windows_wrapper(seeded_state.storage_state_path),
+            ]))
+        if seeded_state.cookies:
+            results.append(self._try_seed_command([
+                "--action", "setCookies",
+                "--cookies", json.dumps([cookie.model_dump(mode="json", by_alias=True) for cookie in seeded_state.cookies]),
+            ]))
+        if seeded_state.local_storage:
+            results.append(self._try_seed_command([
+                "--action", "setLocalStorage",
+                "--entries", json.dumps([entry.model_dump(mode="json") for entry in seeded_state.local_storage]),
+            ]))
+        account = seeded_state.test_account
+        if account:
+            results.append(self._try_seed_command([
+                "--action", "loginHint",
+                "--email", account.email,
+                "--login-url", account.login_url or seeded_state.login_url or str(target.url),
+                "--workspace-id", account.workspace_id or seeded_state.workspace_id,
+            ]))
+        if results and any(item.get("ok") for item in results):
+            status = "applied"
+        elif results:
+            blocker = "; ".join(str(item.get("unsupportedBlocker") or item.get("error") or item) for item in results)
+        else:
+            status = "metadata_only"
+            blocker = "Seeded state fixture did not include importable storage, cookies, localStorage, or login hint."
+        seeded_state.adapter_status = status
+        seeded_state.unsupported_blocker = blocker
+        return {"status": status, "unsupported_blocker": blocker, "results": results}
+
+    def _try_seed_command(self, args: list[str]) -> dict:
+        result = self._try_run(args)
+        if result is None:
+            return {"ok": False, "unsupportedBlocker": f"adapter did not accept {args[1] if len(args) > 1 else args[0]}"}
+        return _parse_json_stdout(result)
 
 
 def _first_nonempty_line(text: str) -> str:
@@ -995,6 +1202,75 @@ def _arg_value(args: Sequence[str], name: str, default: str = "") -> str:
     except ValueError:
         return default
     return str(args[index + 1]) if index + 1 < len(args) else default
+
+
+def _json_arg(args: Sequence[str], name: str, default):
+    raw = _arg_value(args, name)
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return default
+
+
+def _runtime_from_response(response: dict | None) -> BrowserRuntimeMetadata:
+    data = response or {}
+    cdp = str(data.get("cdp", "") or data.get("cdpUrl", ""))
+    port = None
+    if cdp:
+        try:
+            parsed_port = urlparse(cdp).port
+            port = int(parsed_port) if parsed_port else None
+        except ValueError:
+            port = None
+    return BrowserRuntimeMetadata(
+        cdp_url=cdp,
+        cdp_port=port,
+        session_id=str(data.get("sessionId", "") or data.get("session_id", "")),
+        profile_dir=str(data.get("profileDir", "") or data.get("userDataDir", "")),
+        page_url=str(data.get("url", "") or data.get("dedicatedUrl", "")),
+        target_id=str(data.get("targetId", "") or data.get("target_id", "")),
+        page_count=int(data["pages"]) if isinstance(data.get("pages"), int) else None,
+        pinned_target=str(data.get("pinnedTarget", "")),
+        screenshot_method=str(data.get("method", "")),
+        failed_primitive=str(data.get("failedPrimitive", "")),
+        adapter_blocker=str(data.get("unsupportedBlocker", "") or data.get("error", "")),
+        raw=data,
+    )
+
+
+def _merge_runtime(current: BrowserRuntimeMetadata | None, response: dict | None) -> BrowserRuntimeMetadata:
+    incoming = _runtime_from_response(response)
+    if current is None:
+        return incoming
+    data = current.model_dump()
+    for key, value in incoming.model_dump().items():
+        if value not in ("", None, {}, []):
+            data[key] = value
+    return BrowserRuntimeMetadata.model_validate(data)
+
+
+def _attach_customer_panels(report: CustomerReport) -> None:
+    if not report.persona_lenses:
+        report.persona_lenses = synthesize_persona_panel(report)
+    if report.jtbd_forces is None:
+        report.jtbd_forces = synthesize_jtbd_forces(report)
+
+
+def _collect_screenshot_captures(report: CustomerReport) -> list[ScreenshotCaptureRecord]:
+    captures: list[ScreenshotCaptureRecord] = []
+    for evidence in report.evidence:
+        captures.extend(evidence.screenshot_captures)
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[ScreenshotCaptureRecord] = []
+    for capture in captures:
+        key = (capture.path, capture.route, capture.action)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(capture)
+    return deduped
 
 
 def _readline_with_timeout(process: subprocess.Popen[str], timeout: int) -> str:
@@ -1298,12 +1574,15 @@ def _screen_exploration_evidence(screen_exploration: dict) -> tuple[CustomerEvid
     ]
     failed_actions = [action for action in actions if action.get("passed") is False]
     screenshot_paths: list[str] = []
+    screenshot_captures: list[ScreenshotCaptureRecord] = []
     markers: list[str] = []
     for route in screen_exploration.get("routes", []):
         if not isinstance(route, dict):
             continue
         if route.get("entry_screenshot"):
             screenshot_paths.append(str(route["entry_screenshot"]))
+        if isinstance(route.get("entry_screenshot_capture"), dict):
+            screenshot_captures.append(ScreenshotCaptureRecord.model_validate(route["entry_screenshot_capture"]))
         if not route.get("actions"):
             markers.append(
                 f"STEP_SKIP|screen-route-{_slug(str(route.get('route', 'route')))}|"
@@ -1316,6 +1595,11 @@ def _screen_exploration_evidence(screen_exploration: dict) -> tuple[CustomerEvid
                 str(action.get("before_screenshot", "")),
                 str(action.get("after_screenshot", "")),
             ])
+            screenshot_captures.extend(
+                ScreenshotCaptureRecord.model_validate(record)
+                for record in action.get("screenshot_captures", [])
+                if isinstance(record, dict)
+            )
             changed = action.get("url_changed") or action.get("text_changed") or action.get("visual_changed")
             marker = "STEP_PASS" if changed else "STEP_FAIL"
             action_text = action.get("action", {}).get("text") or action.get("action", {}).get("selector", "action")
@@ -1335,6 +1619,7 @@ def _screen_exploration_evidence(screen_exploration: dict) -> tuple[CustomerEvid
             f"{len(changed_actions)} produced observable URL/text/screenshot change."
         ),
         raw_excerpt="\n".join(markers),
+        screenshot_captures=screenshot_captures,
         metadata={
             "runner": "openclaw-windows-session",
             "rubric": "customer-testing-openclaw",
@@ -1424,10 +1709,10 @@ def _research_actions_from_observation(observation: dict, target: ExperienceTarg
                     "goal": "Exercise the realistic first-value form path with generated customer input.",
                 })
     raw_actions = observation.get("actions", []) if isinstance(observation.get("actions"), list) else []
-    safe_actions = _rank_screen_actions([
+    safe_actions = rank_customer_actions(_rank_screen_actions([
         action for action in raw_actions
         if isinstance(action, dict) and _safe_screen_action(action, target)
-    ])
+    ]))
     for action in safe_actions[:4]:
         clean = _clean_screen_action(action)
         if clean.get("text", "").lower() in {"register", "log in", "login"} and actions:
@@ -1436,6 +1721,7 @@ def _research_actions_from_observation(observation: dict, target: ExperienceTarg
             "id": f"click-{_slug(clean.get('text') or clean.get('selector') or 'action')}",
             "kind": "click",
             "goal": "Explore the next visible customer branch.",
+            "reason": "Ranked as a product/customer action over navigation, footer, or developer links.",
             "action": clean,
         })
     return actions[:6]
@@ -1465,11 +1751,14 @@ def _research_brain_evidence(research_brain: dict) -> tuple[CustomerEvidence, li
     ]
     markers: list[str] = []
     screenshot_paths: list[str] = []
+    screenshot_captures: list[ScreenshotCaptureRecord] = []
     for route in routes:
         if not isinstance(route, dict):
             continue
         if route.get("entry_screenshot"):
             screenshot_paths.append(str(route["entry_screenshot"]))
+        if isinstance(route.get("entry_screenshot_capture"), dict):
+            screenshot_captures.append(ScreenshotCaptureRecord.model_validate(route["entry_screenshot_capture"]))
         for index, action in enumerate(route.get("actions", []), start=1):
             if not isinstance(action, dict):
                 continue
@@ -1477,6 +1766,11 @@ def _research_brain_evidence(research_brain: dict) -> tuple[CustomerEvidence, li
                 str(action.get("before_screenshot", "")),
                 str(action.get("after_screenshot", "")),
             ])
+            screenshot_captures.extend(
+                ScreenshotCaptureRecord.model_validate(record)
+                for record in action.get("screenshot_captures", [])
+                if isinstance(record, dict)
+            )
             marker = "STEP_PASS" if (
                 action.get("url_changed") or action.get("text_changed") or action.get("visual_changed")
             ) else "STEP_FAIL"
@@ -1498,6 +1792,7 @@ def _research_brain_evidence(research_brain: dict) -> tuple[CustomerEvidence, li
             f"{len(routes)} route(s); {len(changed_actions)} produced observable change."
         ),
         raw_excerpt="\n".join(markers),
+        screenshot_captures=screenshot_captures,
         metadata={
             "runner": "openclaw-windows-researcher",
             "rubric": "customer-testing-openclaw",
@@ -1550,10 +1845,11 @@ def _research_brain_evidence(research_brain: dict) -> tuple[CustomerEvidence, li
             "Add form-planning, fixtures, seeded accounts, or product-specific input generation before claiming full coverage.",
             core=True,
         ))
-    if not research_brain.get("seeded_state_path"):
+    seeded_status = str(research_brain.get("seeded_state_status", "absent"))
+    if seeded_status in {"absent", "unsupported"}:
         findings.append(_browser_finding(
             "research-brain-no-seeded-state",
-            "No seeded account or state was available for authenticated depth",
+            "No usable seeded account or state was available for authenticated depth",
             CustomerSeverity.medium,
             "The researcher can detect auth but cannot enter the app like a real customer with an account.",
             "Coverage stays pre-auth for dashboards, records, settings, team flows, and saved state.",

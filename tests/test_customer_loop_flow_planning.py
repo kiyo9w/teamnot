@@ -21,6 +21,7 @@ from teamnot.customer_loop import (
     suggest_customer_flow_pack,
 )
 from teamnot.customer_loop.models import CustomerFlow, CustomerFlowPack, CustomerFlowStep
+from teamnot.customer_loop.research_planning import rank_customer_actions
 
 
 def test_suggest_customer_flow_pack_is_multi_journey_and_route_agnostic():
@@ -256,6 +257,16 @@ def test_inspected_flow_ignores_nav_search_and_prioritizes_cta(tmp_path: Path):
     )
     assert all(step.text != "Developers menu" for step in core.steps if step.action == "click_text")
     assert all(step.text != "Skip to main content" for step in core.steps if step.action == "click_text")
+
+
+def test_customer_action_ranking_prefers_product_actions_over_footer_nav():
+    ranked = rank_customer_actions([
+        {"id": "privacy", "text": "Privacy policy", "in_footer": True},
+        {"id": "run", "text": "Run report", "kind": "click", "inMain": True},
+        {"id": "menu", "text": "Menu", "in_nav": True},
+    ])
+
+    assert ranked[0]["id"] == "run"
 
 
 def test_inspected_flow_prioritizes_main_product_cta_over_footer_links(tmp_path: Path):

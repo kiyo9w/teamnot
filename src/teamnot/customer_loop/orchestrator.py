@@ -12,7 +12,7 @@ from teamnot.customer_loop.artifacts import (
     write_report_artifacts,
 )
 from teamnot.customer_loop.brief_generation import generate_followup_brief
-from teamnot.customer_loop.io import load_model
+from teamnot.customer_loop.io import load_domain_oracles, load_model, load_seeded_state
 from teamnot.customer_loop.models import (
     CustomerFinding,
     CustomerFlowPack,
@@ -22,6 +22,10 @@ from teamnot.customer_loop.models import (
     CustomerLoopRunnerName,
     CustomerReport,
     CustomerSeverity,
+)
+from teamnot.customer_loop.research_planning import (
+    compare_iteration_coverage,
+    evaluate_domain_oracles,
 )
 from teamnot.customer_loop.runners import (
     ManualEvidenceRunner,
@@ -50,6 +54,10 @@ class CustomerLoopOrchestrator:
     def run(self, config: CustomerLoopConfig) -> CustomerLoopResult:
         out_dir = ensure_artifact_dirs(config.out_dir)
         plan = default_customer_test_plan(config)
+        if config.seeded_state_path and config.seeded_state is None:
+            config.seeded_state = load_seeded_state(config.seeded_state_path)
+        if config.domain_oracle_path and not config.domain_oracles:
+            config.domain_oracles = load_domain_oracles(config.domain_oracle_path)
         runner = self._runner(config)
         report: CustomerReport | None = None
         selected: CustomerFinding | None = None
@@ -59,26 +67,42 @@ class CustomerLoopOrchestrator:
         iteration_out_dirs: list[Path] = []
         iterations_completed = 0
         last_invoked_finding_id: str | None = None
+        iteration_coverage = []
 
         for iteration in range(1, config.max_iterations + 1):
             iteration_dir = _iteration_dir(out_dir, iteration, config.max_iterations)
             iteration_out_dirs.append(iteration_dir)
             report = runner.run(config.target, config.profile, plan, iteration_dir)
+            _attach_seeded_state_contract(report, config)
+            report.domain_oracles = evaluate_domain_oracles(report, config.domain_oracles)
+            coverage = compare_iteration_coverage(
+                iteration,
+                report,
+                iteration_coverage[-1] if iteration_coverage else None,
+            )
             write_report_artifacts(iteration_dir, config.profile, plan, report)
             selected = select_next_best_move(report, config.severity_threshold)
+            coverage.selected_finding_id = selected.id if selected else None
             generated = None
             iterations_completed = iteration
             if not selected:
                 stopped_reason = "no finding met severity threshold"
+                coverage.stop_reason = stopped_reason
+                iteration_coverage.append(coverage)
                 break
             if config.run_teamnot and last_invoked_finding_id == selected.id:
                 stopped_reason = f"repeated finding after TeamNoT run: {selected.id}"
+                coverage.stop_reason = stopped_reason
+                coverage.replayed = True
+                iteration_coverage.append(coverage)
                 break
             previous = load_brief(config.previous_brief_path) if config.previous_brief_path else None
             generated = generate_followup_brief(report, selected, iteration_dir, previous)
             brief_path = write_generated_brief(iteration_dir, generated)
             stopped_reason = "generated follow-up brief"
             if not config.run_teamnot:
+                coverage.stop_reason = stopped_reason
+                iteration_coverage.append(coverage)
                 break
             if self.run_teamnot_hook:
                 try:
@@ -86,12 +110,20 @@ class CustomerLoopOrchestrator:
                 except Exception as exc:
                     teamnot_invoked = True
                     stopped_reason = f"TeamNoT invocation failed: {exc}"
+                    coverage.teamnot_invoked = True
+                    coverage.stop_reason = stopped_reason
+                    iteration_coverage.append(coverage)
                     break
             teamnot_invoked = True
+            coverage.teamnot_invoked = True
+            coverage.stop_reason = "TeamNoT invoked; retesting"
+            iteration_coverage.append(coverage)
             last_invoked_finding_id = selected.id
             stopped_reason = "generated follow-up brief and invoked TeamNoT"
         else:
             stopped_reason = "max iterations reached"
+            if iteration_coverage:
+                iteration_coverage[-1].stop_reason = stopped_reason
 
         if report is None:
             raise RuntimeError("customer-loop did not execute any iterations")
@@ -109,6 +141,7 @@ class CustomerLoopOrchestrator:
             iterations_completed=iterations_completed,
             teamnot_invoked=teamnot_invoked,
             iteration_out_dirs=iteration_out_dirs,
+            iteration_coverage=iteration_coverage,
         )
         write_loop_summary(result)
         return result
@@ -130,8 +163,24 @@ class CustomerLoopOrchestrator:
             return OpenClawWindowsResearcherRunner(
                 file_fixture_path=config.file_fixture_path,
                 seeded_state_path=config.seeded_state_path,
+                seeded_state=config.seeded_state,
             )
         return OpenClawWindowsCDPRunner()
+
+
+def _attach_seeded_state_contract(report: CustomerReport, config: CustomerLoopConfig) -> None:
+    if not config.seeded_state:
+        return
+    if report.seeded_state:
+        return
+    state = config.seeded_state.model_copy(deep=True)
+    state.adapter_status = "unsupported"
+    state.unsupported_blocker = (
+        f"Runner {config.runner.value} recorded the seeded-state contract but does not apply "
+        "cookies, localStorage, storageState, or login hints. Use openclaw-windows-researcher "
+        "for adapter-level seeded-state application."
+    )
+    report.seeded_state = state
 
 
 def _iteration_dir(out_dir: Path, iteration: int, max_iterations: int) -> Path:

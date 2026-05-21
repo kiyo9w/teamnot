@@ -33,8 +33,12 @@ from teamnot.customer_loop.models import (
     CustomerSeverity,
     ProductExplorationPlan,
     ProductRoute,
+    ResearchActionMemory,
+    SeededCookie,
+    SeededCustomerState,
 )
 from teamnot.customer_loop.orchestrator import default_customer_test_plan
+from teamnot.customer_loop.research_planning import suppress_repeated_noops
 from teamnot.customer_loop.runners import _path_for_windows_wrapper, _resolve_wrapper_path
 
 
@@ -142,6 +146,30 @@ def test_persistent_runner_maps_legacy_wrapper_commands_to_session_payload(monke
         "timeout": 12000,
     }]
     assert json.loads(result.stdout)["sessionId"] == "test-session"
+
+
+def test_persistent_runner_maps_seeded_state_commands(monkeypatch, tmp_path: Path):
+    sent_payloads: list[dict] = []
+    runner = PersistentWinBrowserCommandRunner(wrapper_path=tmp_path / "winbrowser")
+
+    def fake_request(payload, timeout=75):
+        sent_payloads.append(payload)
+        return {"ok": True, "action": payload["action"], "seededStateApplied": True}
+
+    monkeypatch.setattr(runner, "_request", fake_request)
+
+    runner([
+        "scripts/winbrowser",
+        "--action",
+        "setCookies",
+        "--cookies",
+        '[{"name": "session", "value": "secret", "domain": "example.test"}]',
+    ])
+
+    assert sent_payloads == [{
+        "action": "setCookies",
+        "cookies": [{"name": "session", "value": "secret", "domain": "example.test"}],
+    }]
 
 
 def test_persistent_runner_keeps_screenshots_and_eval_on_same_session(monkeypatch, tmp_path: Path):
@@ -254,6 +282,37 @@ def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):
     assert "STEP_PASS|planned-task" not in report.evidence[0].raw_excerpt
     assert report.findings == []
     assert report.scores.trust_readiness >= 8
+    assert report.screenshot_captures
+    assert report.vision_review is not None
+    assert report.vision_review.evidence_source == "screenshot metadata and hashes"
+
+
+def test_researcher_seeded_state_changes_no_seeded_state_finding(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    runner = OpenClawWindowsResearcherRunner(
+        wrapper_path=wrapper,
+        command_runner=lambda command: subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr=""),
+        seeded_state=SeededCustomerState(cookies=[SeededCookie(name="session", value="secret", domain="example.test")]),
+    )
+    target, profile, _plan_model = _plan(tmp_path)
+    research_brain = runner._research_brain_pass(target, profile, ["/"], tmp_path / "out", runner.seeded_state)
+    research_brain["seeded_state_status"] = "applied"
+
+    _evidence, findings = __import__(
+        "teamnot.customer_loop.runners",
+        fromlist=["_research_brain_evidence"],
+    )._research_brain_evidence(research_brain)
+
+    assert "research-brain-no-seeded-state" not in {finding.id for finding in findings}
+
+
+def test_noop_action_memory_suppresses_repeated_actions():
+    actions = [{"id": "click-run"}, {"id": "click-settings"}]
+    memory = [ResearchActionMemory(route="/", chosen_action="click-run", no_op=True)]
+
+    assert suppress_repeated_noops("/", actions, memory) == [{"id": "click-settings"}]
 
 
 def test_openclaw_runner_surfaces_persona_research_gap_findings(tmp_path: Path):
@@ -1241,9 +1300,10 @@ def test_openclaw_researcher_runner_writes_research_brain_artifacts(tmp_path: Pa
     monkeypatch.setattr(
         OpenClawWindowsResearcherRunner,
         "_research_brain_pass",
-        lambda self, target, profile, routes, out_dir: calls.append("brain") or {
+        lambda self, target, profile, routes, out_dir, seeded_state=None: calls.append("brain") or {
             "method": "mock research brain",
             "seeded_state_path": str(seeded),
+            "seeded_state_status": "applied" if seeded_state else "absent",
             "routes_discovered": ["/app"],
             "actions_executed": 2,
             "routes": [

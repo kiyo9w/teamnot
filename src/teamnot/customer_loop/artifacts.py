@@ -73,6 +73,18 @@ def render_customer_report(report: CustomerReport) -> str:
         "## Researcher Observations",
         *_render_researcher_observations(report),
         "",
+        "## Visual Evidence Review",
+        *_render_visual_review(report),
+        "",
+        "## Persona And JTBD Panel",
+        *_render_persona_jtbd(report),
+        "",
+        "## Domain Output Correctness",
+        *_render_domain_oracles(report),
+        "",
+        "## Seeded State And Browser Runtime",
+        *_render_seeded_runtime(report),
+        "",
         "## Customer Objections",
         *_render_customer_objections(report),
         "",
@@ -418,6 +430,86 @@ def _render_researcher_observations(report: CustomerReport) -> list[str]:
     return observations or ["- No structured researcher observations were captured."]
 
 
+def _render_visual_review(report: CustomerReport) -> list[str]:
+    review = report.vision_review
+    if not review:
+        return ["- No screenshot/vision artifact was attached to this report."]
+    lines = [
+        f"- Review kind: {review.review_kind}",
+        f"- Evidence source: {review.evidence_source}",
+        f"- Screenshot captures: {review.screenshot_count}",
+        f"- Judgment boundary: {review.judgment_summary}",
+    ]
+    lines.extend(f"- Heuristic: {item}" for item in review.heuristics)
+    lines.extend(f"- Blocker: {item}" for item in review.blockers)
+    return lines
+
+
+def _render_persona_jtbd(report: CustomerReport) -> list[str]:
+    lines: list[str] = []
+    if report.persona_lenses:
+        for lens in report.persona_lenses:
+            blocker = "; ".join(lens.blockers[:3]) or "none detected by deterministic panel"
+            conflicts = "; ".join(lens.conflicts[:2]) or "none"
+            lines.append(f"- {lens.lens} ({lens.role}): blockers: {blocker}; conflicts: {conflicts}.")
+    else:
+        lines.append("- No multi-persona panel artifact was attached.")
+    if report.jtbd_forces:
+        forces = report.jtbd_forces
+        lines.extend([
+            f"- Push: {forces.push}",
+            f"- Pull: {forces.pull}",
+            f"- Anxiety: {forces.anxiety}",
+            f"- Habit: {forces.habit}",
+            f"- Trigger: {forces.trigger}",
+            f"- Success metric: {forces.success_metric}",
+        ])
+    else:
+        lines.append("- JTBD forces were not synthesized for this run.")
+    return lines
+
+
+def _render_domain_oracles(report: CustomerReport) -> list[str]:
+    if not report.domain_oracles:
+        return ["- No domain-output oracle artifact was attached."]
+    return [
+        f"- {oracle.name}: {oracle.coverage_status}; "
+        f"{oracle.semantic_rubric or oracle.manual_checkpoint or oracle.expected_output or oracle.notes or 'No rubric detail.'}"
+        for oracle in report.domain_oracles
+    ]
+
+
+def _render_seeded_runtime(report: CustomerReport) -> list[str]:
+    lines: list[str] = []
+    if report.seeded_state:
+        state = report.seeded_state
+        lines.append(f"- Seeded state status: {state.adapter_status}")
+        if state.unsupported_blocker:
+            lines.append(f"- Seeded state blocker: {state.unsupported_blocker}")
+        if state.cleanup_notes:
+            lines.append(f"- Cleanup notes: {state.cleanup_notes}")
+        if state.reset_notes:
+            lines.append(f"- Reset notes: {state.reset_notes}")
+    else:
+        lines.append("- Seeded state: none provided.")
+    if report.browser_runtime:
+        runtime = report.browser_runtime
+        lines.extend([
+            f"- CDP URL: {runtime.cdp_url or 'not reported'}",
+            f"- CDP port: {runtime.cdp_port if runtime.cdp_port is not None else 'not reported'}",
+            f"- Session id: {runtime.session_id or 'not reported'}",
+            f"- Page URL: {runtime.page_url or 'not reported'}",
+            f"- Screenshot method: {runtime.screenshot_method or 'not reported'}",
+        ])
+        if runtime.failed_primitive:
+            lines.append(f"- Failed primitive: {runtime.failed_primitive}")
+        if runtime.adapter_blocker:
+            lines.append(f"- Adapter blocker: {runtime.adapter_blocker}")
+    else:
+        lines.append("- Browser runtime metadata: not reported.")
+    return lines
+
+
 def _render_next_research_actions(report: CustomerReport) -> list[str]:
     actions = []
     raw = _raw_evidence(report)
@@ -497,6 +589,14 @@ def render_loop_summary(result: CustomerLoopResult) -> str:
             "## Iteration Artifacts",
             *[f"- {path}" for path in result.iteration_out_dirs],
         ])
+    if result.iteration_coverage:
+        lines.extend(["", "## Iteration Coverage"])
+        for coverage in result.iteration_coverage:
+            lines.append(
+                f"- Iteration {coverage.iteration}: "
+                f"new_evidence={coverage.new_evidence}, replayed={coverage.replayed}, "
+                f"selected={coverage.selected_finding_id or 'none'}, stop={coverage.stop_reason or 'n/a'}"
+            )
     lines.extend([
         "",
         "## Next Best Move",
@@ -522,6 +622,26 @@ def write_report_artifacts(
     save_yaml(profile, out / "customer_profile.yaml")
     save_yaml(plan, out / "customer_test_plan.yaml")
     save_json(report, out / "customer_report.json")
+    if report.seeded_state:
+        save_yaml(report.seeded_state.redacted(), out / "seeded_state_metadata.yaml")
+    if report.browser_runtime:
+        save_yaml(report.browser_runtime, out / "browser_runtime.yaml")
+    if report.screenshot_captures:
+        save_yaml({"captures": [record.model_dump(mode="json") for record in report.screenshot_captures]}, out / "screenshot_captures.yaml")
+    if report.vision_review:
+        save_yaml(report.vision_review, out / "vision_review.yaml")
+    if report.persona_lenses or report.jtbd_forces:
+        save_yaml(
+            {
+                "persona_lenses": [lens.model_dump(mode="json") for lens in report.persona_lenses],
+                "jtbd_forces": report.jtbd_forces.model_dump(mode="json") if report.jtbd_forces else None,
+            },
+            out / "persona_jtbd_panel.yaml",
+        )
+    if report.domain_oracles:
+        save_yaml({"oracles": [oracle.model_dump(mode="json") for oracle in report.domain_oracles]}, out / "domain_oracles.yaml")
+    if report.action_memory:
+        save_yaml({"action_memory": [item.model_dump(mode="json") for item in report.action_memory]}, out / "research_action_memory.yaml")
     (out / "customer_report.md").write_text(render_customer_report(report), encoding="utf-8")
     return out
 
@@ -535,6 +655,11 @@ def write_generated_brief(out_dir: str | Path, generated: GeneratedBrief) -> Pat
 
 def write_loop_summary(result: CustomerLoopResult) -> Path:
     out = ensure_artifact_dirs(result.out_dir)
+    if result.iteration_coverage:
+        save_yaml(
+            {"iterations": [coverage.model_dump(mode="json") for coverage in result.iteration_coverage]},
+            out / "iteration_coverage.yaml",
+        )
     path = out / "loop_summary.md"
     path.write_text(render_loop_summary(result), encoding="utf-8")
     return path

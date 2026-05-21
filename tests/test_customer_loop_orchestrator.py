@@ -199,6 +199,8 @@ def test_orchestrator_can_invoke_teamnot_and_retest_until_clean(tmp_path: Path):
     assert [path.name for path in result.iteration_out_dirs] == ["iteration-01", "iteration-02"]
     assert (tmp_path / "out" / "iteration-01" / "generated_brief.yaml").exists()
     assert (tmp_path / "out" / "iteration-02" / "customer_report.md").exists()
+    assert (tmp_path / "out" / "iteration_coverage.yaml").exists()
+    assert result.iteration_coverage[0].teamnot_invoked is True
     assert "iteration-01" in (tmp_path / "out" / "loop_summary.md").read_text(encoding="utf-8")
 
 
@@ -219,6 +221,54 @@ def test_orchestrator_stops_at_max_iterations_when_findings_remain(tmp_path: Pat
     assert result.iterations_completed == 2
     assert result.selected_finding is not None
     assert result.stopped_reason == "repeated finding after TeamNoT run: blocking"
+    assert result.iteration_coverage[-1].replayed is True
+
+
+def test_orchestrator_loads_domain_oracle_and_reports_gap(tmp_path: Path):
+    evidence = tmp_path / "evidence.md"
+    evidence.write_text("Title: Missing proof\nSeverity: low\n", encoding="utf-8")
+    oracle = tmp_path / "oracle.yaml"
+    oracle.write_text("name: Expected export\nexpected_output: paid invoice export\n", encoding="utf-8")
+    config = CustomerLoopConfig(
+        target=ExperienceTarget(url="https://example-product.test"),
+        profile=_profile(),
+        out_dir=tmp_path / "out",
+        evidence_path=evidence,
+        domain_oracle_path=oracle,
+        severity_threshold=CustomerSeverity.high,
+    )
+
+    result = CustomerLoopOrchestrator().run(config)
+
+    assert result.report.domain_oracles[0].name == "Expected export"
+    assert result.report.domain_oracles[0].coverage_status == "manual_checkpoint"
+    assert (tmp_path / "out" / "domain_oracles.yaml").exists()
+
+
+def test_orchestrator_records_seeded_state_for_unsupported_runner(tmp_path: Path):
+    evidence = tmp_path / "evidence.md"
+    evidence.write_text("Title: Minor issue\nSeverity: low\n", encoding="utf-8")
+    seeded = tmp_path / "seeded.yaml"
+    seeded.write_text(
+        "test_account:\n  email: customer@example.test\n  password: secret\n",
+        encoding="utf-8",
+    )
+    config = CustomerLoopConfig(
+        target=ExperienceTarget(url="https://example-product.test"),
+        profile=_profile(),
+        out_dir=tmp_path / "out",
+        evidence_path=evidence,
+        seeded_state_path=seeded,
+        severity_threshold=CustomerSeverity.high,
+    )
+
+    result = CustomerLoopOrchestrator().run(config)
+
+    assert result.report.seeded_state is not None
+    assert result.report.seeded_state.adapter_status == "unsupported"
+    metadata = (tmp_path / "out" / "seeded_state_metadata.yaml").read_text(encoding="utf-8")
+    assert "***REDACTED***" in metadata
+    assert "secret" not in metadata
 
 
 def test_orchestrator_retries_different_findings_until_max_iterations(tmp_path: Path):
