@@ -70,6 +70,23 @@ teamnot customer-loop \
 `--no-run-teamnot` is the safe default. Passing `--run-teamnot` explicitly lets
 the loop invoke `teamnot run --brief generated_brief.yaml`.
 
+Generate a starter flow pack for a project:
+
+```bash
+teamnot customer-flow-plan \
+  --target https://example-product.test \
+  --profile .teamnot/customer-loop/customer.yaml \
+  --route / \
+  --route /app/projects \
+  --route /settings/team \
+  --out .teamnot/customer-loop/customer_flow.yaml
+```
+
+This creates a universal multi-journey YAML scaffold with TODO selectors and
+expected text. It is intentionally project-agnostic: agents can fill in exact
+selectors/actions after inspecting the product, then run it through
+`--runner openclaw-windows-flow`.
+
 ## Artifacts
 
 Customer Loop writes project-local artifacts under the requested `--out`

@@ -60,6 +60,8 @@ from teamnot.customer_loop import (
     OpenClawWindowsInteractiveRunner,
     default_customer_test_plan,
     load_model,
+    save_yaml,
+    suggest_customer_flow_pack,
     write_report_artifacts,
 )
 from teamnot.dod import DoDEvaluator
@@ -377,6 +379,35 @@ def customer_test(
         console.print(f"[red]Customer test failed:[/red] {e}")
         sys.exit(1)
     console.print(f"[green]Customer test artifacts written:[/green] {out_dir}")
+
+
+@main.command("customer-flow-plan", help="Generate a starter customer flow pack YAML.")
+@click.option("--target", required=True, help="Target product URL.")
+@click.option("--profile", "profile_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              required=True, help="Customer profile YAML.")
+@click.option("--route", "routes", multiple=True,
+              help="Product route/screen to include, such as /, /signup, /app/projects.")
+@click.option("--out", "out_path", type=click.Path(dir_okay=False, path_type=Path),
+              required=True, help="Output customer flow YAML path.")
+def customer_flow_plan(
+    target: str,
+    profile_path: Path,
+    routes: tuple[str, ...],
+    out_path: Path,
+) -> None:
+    try:
+        profile = load_model(profile_path, CustomerProfile)
+        flow_pack = suggest_customer_flow_pack(
+            ExperienceTarget(url=target),
+            profile,
+            list(routes),
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        save_yaml(flow_pack, out_path)
+    except CustomerLoopError as e:
+        console.print(f"[red]Customer flow plan failed:[/red] {e}")
+        sys.exit(1)
+    console.print(f"[green]Customer flow plan written:[/green] {out_path}")
 
 
 @main.command("customer-loop", help="Generate a customer-centered report and next TeamNoT brief.")

@@ -8,6 +8,7 @@ from teamnot.customer_loop.artifacts import (
     write_report_artifacts,
 )
 from teamnot.customer_loop.brief_generation import generate_followup_brief
+from teamnot.customer_loop.flow_planning import suggest_customer_flow_pack
 from teamnot.customer_loop.io import load_model, load_yaml, save_json, save_yaml
 from teamnot.customer_loop.models import (
     CustomerEvidence,
@@ -81,6 +82,7 @@ __all__ = [
     "save_json",
     "save_yaml",
     "select_next_best_move",
+    "suggest_customer_flow_pack",
     "write_generated_brief",
     "write_loop_summary",
     "write_report_artifacts",
