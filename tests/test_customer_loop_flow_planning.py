@@ -10,10 +10,14 @@ from teamnot.cli.__main__ import main
 from teamnot.customer_loop import (
     CustomerProfile,
     ExperienceTarget,
+    flow_pack_gaps,
     inspect_customer_flow_pack,
+    make_flow_pack_runnable,
+    render_flow_refinement_report,
     save_yaml,
     suggest_customer_flow_pack,
 )
+from teamnot.customer_loop.models import CustomerFlow, CustomerFlowPack, CustomerFlowStep
 
 
 def test_suggest_customer_flow_pack_is_multi_journey_and_route_agnostic():
@@ -249,6 +253,72 @@ def test_inspected_flow_ignores_nav_search_and_prioritizes_cta(tmp_path: Path):
     )
     assert all(step.text != "Developers menu" for step in core.steps if step.action == "click_text")
     assert all(step.text != "Skip to main content" for step in core.steps if step.action == "click_text")
+
+
+def test_make_flow_pack_runnable_converts_todos_to_checkpoints():
+    inspected = CustomerFlowPack(
+        name="Product inspected flow pack",
+        flows=[
+            CustomerFlow(
+                name="Core",
+                steps=[
+                    CustomerFlowStep(id="loaded", action="assert_selector", selector="main"),
+                    CustomerFlowStep(id="outcome", action="wait_for_text", text="TODO: expected result/success text"),
+                ],
+            )
+        ],
+    )
+
+    runnable = make_flow_pack_runnable(inspected)
+
+    assert runnable.flows[0].steps[0].action == "assert_selector"
+    assert runnable.flows[0].steps[1].action == "checkpoint"
+    assert "unresolved generated step" in runnable.flows[0].steps[1].description
+    assert flow_pack_gaps(inspected) == ["Core / outcome: unresolved TODO remains."]
+    refinement = render_flow_refinement_report(inspected, runnable)
+    assert "wait_for_text` -> `checkpoint" in refinement
+    assert "External And Irreversible Action Policy" in refinement
+
+
+def test_inspected_trust_threshold_does_not_become_page_assertion(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def command_runner(command):
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+        if action == "eval":
+            result = {
+                "mainSelector": "main",
+                "actions": [{"text": "Try in your IDE", "selector": "button", "tag": "button"}],
+                "inputs": [],
+                "resultCues": [],
+                "recoveryCues": [],
+                "trustCues": [],
+                "adoptionCues": [],
+            }
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"ok": True, "result": result}),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    flow_pack = inspect_customer_flow_pack(
+        ExperienceTarget(url="https://example-product.test"),
+        CustomerProfile(persona="Developer", role="engineer", trust_threshold="needs SOC2 proof"),
+        ["/"],
+        wrapper_path=wrapper,
+        command_runner=command_runner,
+    )
+
+    trust_flow = flow_pack.flows[-1]
+    assert trust_flow.steps[0].action == "checkpoint"
+    assert trust_flow.steps[0].text == ""
+    assert "needs SOC2 proof" in trust_flow.steps[0].description
 
 
 def test_customer_flow_inspect_cli_reports_missing_wrapper(tmp_path: Path):

@@ -9,7 +9,10 @@ from teamnot.customer_loop.artifacts import (
 )
 from teamnot.customer_loop.brief_generation import generate_followup_brief
 from teamnot.customer_loop.flow_planning import (
+    flow_pack_gaps,
     inspect_customer_flow_pack,
+    make_flow_pack_runnable,
+    render_flow_refinement_report,
     suggest_customer_flow_pack,
 )
 from teamnot.customer_loop.io import load_model, load_yaml, save_json, save_yaml
@@ -78,14 +81,17 @@ __all__ = [
     "default_customer_test_plan",
     "ensure_artifact_dirs",
     "generate_followup_brief",
+    "flow_pack_gaps",
     "inspect_customer_flow_pack",
     "load_model",
     "load_yaml",
     "render_customer_report",
+    "render_flow_refinement_report",
     "render_loop_summary",
     "save_json",
     "save_yaml",
     "select_next_best_move",
+    "make_flow_pack_runnable",
     "suggest_customer_flow_pack",
     "write_generated_brief",
     "write_loop_summary",

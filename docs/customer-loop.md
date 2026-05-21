@@ -104,6 +104,24 @@ copy, then writes a flow pack with concrete selectors and action text where the
 browser can infer them. It still leaves TODOs where only product intent can
 decide the right customer input or success criterion.
 
+Run a full inspected customer session:
+
+```bash
+teamnot customer-flow-session \
+  --target https://example-product.test \
+  --profile .teamnot/customer-loop/customer.yaml \
+  --route / \
+  --route /app/projects \
+  --out .teamnot/customer-loop/session-001
+```
+
+This performs the productized loop for flow discovery: inspect the browser DOM,
+write `inspected_flow.yaml`, convert unresolved TODO/external-risky actions into
+a safer `runnable_flow.yaml`, execute that flow with screenshots, write the
+customer report, and emit `flow_refinement_report.md`. External downloads,
+installers, login, checkout, claim-offer, and account actions are verified as
+visible links/text unless a human-approved flow explicitly models the click.
+
 ## Artifacts
 
 Customer Loop writes project-local artifacts under the requested `--out`
@@ -113,6 +131,9 @@ directory, commonly `.teamnot/customer-loop/<run-id>/`:
 - `customer_test_plan.yaml`
 - `customer_report.md`
 - `customer_report.json`
+- `inspected_flow.yaml`
+- `runnable_flow.yaml`
+- `flow_refinement_report.md`
 - `generated_brief.yaml`
 - `loop_summary.md`
 - `screenshots/`

@@ -61,6 +61,8 @@ from teamnot.customer_loop import (
     default_customer_test_plan,
     inspect_customer_flow_pack,
     load_model,
+    make_flow_pack_runnable,
+    render_flow_refinement_report,
     save_yaml,
     suggest_customer_flow_pack,
     write_report_artifacts,
@@ -443,6 +445,56 @@ def customer_flow_inspect(
         console.print(f"[red]Customer flow inspect failed:[/red] {e}")
         sys.exit(1)
     console.print(f"[green]Customer flow inspect written:[/green] {out_path}")
+
+
+@main.command("customer-flow-session", help="Inspect, refine, run, and report a customer flow session.")
+@click.option("--target", required=True, help="Target product URL.")
+@click.option("--profile", "profile_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              required=True, help="Customer profile YAML.")
+@click.option("--route", "routes", multiple=True,
+              help="Product route/screen to inspect, such as /, /signup, /app/projects.")
+@click.option("--out", "out_dir", type=click.Path(file_okay=False, path_type=Path),
+              required=True, help="Output artifact directory.")
+@click.option("--wrapper", "wrapper_path", type=click.Path(dir_okay=False, path_type=Path),
+              default=Path("scripts/winbrowser"), show_default=True,
+              help="Browser wrapper command for OpenClaw Windows CDP.")
+def customer_flow_session(
+    target: str,
+    profile_path: Path,
+    routes: tuple[str, ...],
+    out_dir: Path,
+    wrapper_path: Path,
+) -> None:
+    try:
+        profile = load_model(profile_path, CustomerProfile)
+        target_model = ExperienceTarget(url=target)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        inspected = inspect_customer_flow_pack(
+            target_model,
+            profile,
+            list(routes),
+            wrapper_path=wrapper_path,
+        )
+        runnable = make_flow_pack_runnable(inspected)
+        save_yaml(inspected, out_dir / "inspected_flow.yaml")
+        save_yaml(runnable, out_dir / "runnable_flow.yaml")
+        plan = default_customer_test_plan(CustomerLoopConfig(
+            target=target_model,
+            profile=profile,
+            out_dir=out_dir,
+            runner=CustomerLoopRunnerName.openclaw_windows_flow,
+            flow_path=out_dir / "runnable_flow.yaml",
+        ))
+        report = OpenClawWindowsFlowRunner(runnable).run(target_model, profile, plan, out_dir)
+        write_report_artifacts(out_dir, profile, plan, report)
+        (out_dir / "flow_refinement_report.md").write_text(
+            render_flow_refinement_report(inspected, runnable, report),
+            encoding="utf-8",
+        )
+    except (CustomerLoopError, FileNotFoundError, RuntimeError) as e:
+        console.print(f"[red]Customer flow session failed:[/red] {e}")
+        sys.exit(1)
+    console.print(f"[green]Customer flow session artifacts written:[/green] {out_dir}")
 
 
 @main.command("customer-loop", help="Generate a customer-centered report and next TeamNoT brief.")

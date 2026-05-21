@@ -12,6 +12,7 @@ from teamnot.customer_loop.models import (
     CustomerFlowPack,
     CustomerFlowStep,
     CustomerProfile,
+    CustomerReport,
     ExperienceTarget,
 )
 
@@ -56,6 +57,71 @@ def inspect_customer_flow_pack(
         reset_between_flows=True,
         flows=flows,
     )
+
+
+def make_flow_pack_runnable(flow_pack: CustomerFlowPack) -> CustomerFlowPack:
+    return CustomerFlowPack(
+        name=f"{flow_pack.name} runnable",
+        reset_between_flows=flow_pack.reset_between_flows,
+        flows=[
+            CustomerFlow(
+                name=flow.name,
+                start_url=flow.start_url,
+                steps=[_make_step_runnable(step) for step in flow.steps],
+            )
+            for flow in flow_pack.flows
+        ],
+    )
+
+
+def render_flow_refinement_report(
+    inspected: CustomerFlowPack,
+    runnable: CustomerFlowPack,
+    report: CustomerReport | None = None,
+) -> str:
+    inspected_gaps = flow_pack_gaps(inspected)
+    runnable_gaps = flow_pack_gaps(runnable)
+    report_gaps = _report_gaps(report) if report else []
+    remaining_gaps = _dedupe([*inspected_gaps, *runnable_gaps, *report_gaps])
+    gap_lines = [f"- {gap}" for gap in remaining_gaps] if remaining_gaps else ["- None detected."]
+    lines = [
+        "# Customer Flow Refinement Report",
+        "",
+        f"Inspected flow pack: {inspected.name}",
+        f"Runnable flow pack: {runnable.name}",
+        "",
+        "## Refinements Applied",
+        *_refinement_lines(inspected, runnable),
+        "",
+        "## Remaining Gaps",
+        *gap_lines,
+        "",
+        "## External And Irreversible Action Policy",
+        "- External downloads, installers, login, checkout, claim-offer, and account actions are verified as visible text/links unless explicitly modeled by a human-approved flow.",
+        "- TODO steps are converted to checkpoints in the runnable flow so TeamNoT reports the missing customer input instead of pretending it tested it.",
+        "- Screenshots remain attached to every executed step in the customer report.",
+    ]
+    return "\n".join(lines).strip() + "\n"
+
+
+def flow_pack_gaps(flow_pack: CustomerFlowPack) -> list[str]:
+    gaps: list[str] = []
+    for flow in flow_pack.flows:
+        for step in flow.steps:
+            text = " ".join([
+                step.id,
+                step.action,
+                step.selector,
+                step.text,
+                step.value,
+                str(step.file or ""),
+                step.description,
+            ])
+            if "TODO:" in text:
+                gaps.append(f"{flow.name} / {step.id}: unresolved TODO remains.")
+            if step.action == "checkpoint":
+                gaps.append(f"{flow.name} / {step.id}: checkpoint requires human/agent interpretation.")
+    return gaps
 
 
 def _first_value_flow(route: str, profile: CustomerProfile) -> CustomerFlow:
@@ -234,13 +300,7 @@ def _flow_from_page(page: dict, profile: CustomerProfile, primary: bool) -> Cust
             description=f"Enter realistic input as {profile.role or profile.persona}.",
         ))
     if action:
-        steps.append(CustomerFlowStep(
-            id="start-primary-action",
-            action="click_text" if action.get("text") else "click",
-            selector=action.get("selector", ""),
-            text=action.get("text", ""),
-            description=f"Click the visible customer action `{action.get('text') or action.get('selector')}`.",
-        ))
+        steps.append(_step_for_action("start-primary-action", action, "Click the primary customer action."))
     else:
         steps.append(CustomerFlowStep(
             id="identify-primary-action",
@@ -276,13 +336,7 @@ def _inspected_error_recovery_flow(page: dict) -> CustomerFlow:
             description="Use an input mistake that a real customer would make.",
         ))
     if action:
-        steps.append(CustomerFlowStep(
-            id="submit-invalid-input",
-            action="click_text" if action.get("text") else "click",
-            selector=action.get("selector", ""),
-            text=action.get("text", ""),
-            description="Submit the invalid customer input.",
-        ))
+        steps.append(_step_for_action("submit-invalid-input", action, "Submit the invalid customer input."))
     steps.extend([
         CustomerFlowStep(
             id="recovery-guidance-visible",
@@ -304,23 +358,41 @@ def _inspected_error_recovery_flow(page: dict) -> CustomerFlow:
 def _inspected_trust_and_adoption_flow(pages: list[dict], profile: CustomerProfile) -> CustomerFlow:
     trust_cue = _best_cue(cue for page in pages for cue in page.get("trustCues", []))
     adoption_cue = _best_cue(cue for page in pages for cue in page.get("adoptionCues", []))
+    trust_step = (
+        CustomerFlowStep(
+            id="trust-cue-visible",
+            action="assert_text",
+            text=trust_cue,
+            description="Confirm the page addresses the customer's adoption risk.",
+        )
+        if trust_cue
+        else CustomerFlowStep(
+            id="trust-cue-visible",
+            action="checkpoint",
+            description=(
+                "No concrete trust cue was inferred from the page. "
+                f"Customer trust threshold: {profile.trust_threshold or 'not specified'}"
+            ),
+        )
+    )
+    adoption_step = (
+        CustomerFlowStep(
+            id="support-or-next-step-visible",
+            action="assert_text",
+            text=adoption_cue,
+            description="Confirm the customer has a clear next step after evaluation.",
+        )
+        if adoption_cue
+        else CustomerFlowStep(
+            id="support-or-next-step-visible",
+            action="checkpoint",
+            description="No concrete support, pricing, pilot, docs, or onboarding cue was inferred from the page.",
+        )
+    )
     return CustomerFlow(
         name="Trust and adoption journey",
         start_url=pages[0].get("route", "/") if pages else "/",
-        steps=[
-            CustomerFlowStep(
-                id="trust-cue-visible",
-                action="assert_text",
-                text=trust_cue or profile.trust_threshold or "TODO: privacy, security, pricing, support, or proof text",
-                description="Confirm the page addresses the customer's adoption risk.",
-            ),
-            CustomerFlowStep(
-                id="support-or-next-step-visible",
-                action="assert_text",
-                text=adoption_cue or "TODO: support, contact, pricing, pilot, docs, or onboarding text",
-                description="Confirm the customer has a clear next step after evaluation.",
-            ),
-        ],
+        steps=[trust_step, adoption_step],
     )
 
 
@@ -353,6 +425,93 @@ def _sample_value_for_input(input_control: dict) -> str:
     if "search" in label:
         return "customer data"
     return "TODO: realistic customer input"
+
+
+def _step_for_action(step_id: str, action: dict, fallback_description: str) -> CustomerFlowStep:
+    text = action.get("text", "")
+    selector = action.get("selector", "")
+    href = action.get("href", "")
+    if _requires_human_approval(action):
+        return CustomerFlowStep(
+            id=step_id,
+            action="assert_text",
+            selector="",
+            text=text,
+            description=(
+                f"External/irreversible CTA detected ({href or text}); verify visibility only. "
+                "Model the click explicitly in a human-approved flow if needed."
+            ),
+        )
+    return CustomerFlowStep(
+        id=step_id,
+        action="click_text" if text else "click",
+        selector=selector,
+        text=text,
+        description=f"{fallback_description} `{text or selector}`.",
+    )
+
+
+def _requires_human_approval(action: dict) -> bool:
+    text = str(action.get("text", "")).lower()
+    href = str(action.get("href", "")).lower()
+    risky_terms = (
+        "download", "installer", "login", "log in", "sign in", "sign up",
+        "claim", "checkout", "purchase", "buy", "contact sales",
+    )
+    return bool(href and not href.startswith("#") and any(term in f"{text} {href}" for term in risky_terms))
+
+
+def _make_step_runnable(step: CustomerFlowStep) -> CustomerFlowStep:
+    text = " ".join([
+        step.selector,
+        step.text,
+        step.value,
+        str(step.file or ""),
+        step.description,
+    ])
+    if "TODO:" not in text:
+        return step
+    return CustomerFlowStep(
+        id=step.id,
+        action="checkpoint",
+        description=(
+            f"Skipped unresolved generated step `{step.action}`. "
+            f"Original selector/text/value: {step.selector or step.text or step.value or step.file or 'not specified'}"
+        ),
+    )
+
+
+def _refinement_lines(inspected: CustomerFlowPack, runnable: CustomerFlowPack) -> list[str]:
+    lines: list[str] = []
+    for inspected_flow, runnable_flow in zip(inspected.flows, runnable.flows, strict=False):
+        for inspected_step, runnable_step in zip(inspected_flow.steps, runnable_flow.steps, strict=False):
+            if inspected_step != runnable_step:
+                lines.append(
+                    f"- {inspected_flow.name} / {inspected_step.id}: `{inspected_step.action}` -> `{runnable_step.action}`"
+                )
+    return lines or ["- No automatic refinements were needed."]
+
+
+def _report_gaps(report: CustomerReport | None) -> list[str]:
+    if not report:
+        return []
+    gaps = [f"customer finding: {finding.severity.value} - {finding.title}" for finding in report.findings]
+    raw = "\n".join(evidence.raw_excerpt for evidence in report.evidence)
+    for line in raw.splitlines():
+        if line.startswith("STEP_FAIL|"):
+            gaps.append(f"failed step: {line}")
+    return gaps
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
 
 
 def _input_is_customer_workflow(input_control: dict) -> bool:
