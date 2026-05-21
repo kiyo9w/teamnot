@@ -121,8 +121,9 @@ def render_customer_report(report: CustomerReport) -> str:
     if not report.evidence:
         lines.append("No evidence captured.")
     for item in report.evidence:
+        lines.append(f"- Evidence kind: {item.kind}")
         if item.observed_behavior:
-            lines.append(f"- {item.observed_behavior}")
+            lines.append(f"  - Observed behavior: {item.observed_behavior}")
         for screenshot in item.screenshot_paths:
             lines.append(f"  - Screenshot: {screenshot}")
         if item.raw_excerpt:
