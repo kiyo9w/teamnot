@@ -36,6 +36,8 @@ from teamnot.customer_loop.models import (
     ResearchActionMemory,
     SeededCookie,
     SeededCustomerState,
+    SeededLocalStorageEntry,
+    SeededTestAccount,
 )
 from teamnot.customer_loop.orchestrator import default_customer_test_plan
 from teamnot.customer_loop.research_planning import suppress_repeated_noops
@@ -306,6 +308,57 @@ def test_researcher_seeded_state_changes_no_seeded_state_finding(tmp_path: Path)
     )._research_brain_evidence(research_brain)
 
     assert "research-brain-no-seeded-state" not in {finding.id for finding in findings}
+
+
+def test_researcher_applies_seeded_state_contract_through_browser_adapter(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    storage = tmp_path / "storage-state.json"
+    storage.write_text('{"cookies": []}', encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def command_runner(command):
+        commands.append(list(command))
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "importStorageState":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "seededStateApplied": true}', stderr="")
+        if action == "setCookies":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "cookiesApplied": 1}', stderr="")
+        if action == "setLocalStorage":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "localStorageValuesApplied": 1}', stderr="")
+        if action == "loginHint":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "seededStateApplied": false}', stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    state = SeededCustomerState(
+        storage_state_path=storage,
+        cookies=[SeededCookie(name="session", value="secret", domain="example.test")],
+        local_storage=[SeededLocalStorageEntry(origin="https://example-product.test", values={"workspace": "demo"})],
+        test_account=SeededTestAccount(
+            email="customer@example.test",
+            password="secret",
+            login_url="https://example-product.test/auth/login",
+            workspace_id="demo",
+        ),
+    )
+    target, _profile_model, _plan_model = _plan(tmp_path)
+
+    result = OpenClawWindowsResearcherRunner(
+        wrapper_path=wrapper,
+        command_runner=command_runner,
+        seeded_state=state,
+    )._apply_seeded_state(target, state)
+
+    assert result["status"] == "applied"
+    assert state.adapter_status == "applied"
+    assert [cmd[cmd.index("--action") + 1] for cmd in commands] == [
+        "importStorageState",
+        "setCookies",
+        "setLocalStorage",
+        "loginHint",
+    ]
+    assert "secret" in commands[1][commands[1].index("--cookies") + 1]
 
 
 def test_noop_action_memory_suppresses_repeated_actions():

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from teamnot.brief import load_brief
 from teamnot.customer_loop import (
+    BrowserRuntimeMetadata,
     CustomerEvidence,
     CustomerJob,
     CustomerLoopConfig,
@@ -12,6 +13,7 @@ from teamnot.customer_loop import (
     CustomerReport,
     CustomerSeverity,
     CustomerTestPlan,
+    DeterministicScreenshotReviewer,
     ExperienceTarget,
     OpenClawWindowsCDPRunner,
     ScreenshotCaptureRecord,
@@ -82,6 +84,13 @@ def test_report_artifacts_write_redacted_seeded_state_and_vision_metadata(tmp_pa
             test_account=SeededTestAccount(email="customer@example.test", password="secret"),
             adapter_status="applied",
         ),
+        browser_runtime=BrowserRuntimeMetadata(
+            cdp_url="http://127.0.0.1:18801",
+            cdp_port=18801,
+            session_id="teamnot-customer-test",
+            page_url="https://example-product.test/app",
+            screenshot_method="playwright-with-fallback",
+        ),
         screenshot_captures=[capture],
         vision_review=VisionReviewArtifact(screenshot_count=1),
     )
@@ -92,6 +101,44 @@ def test_report_artifacts_write_redacted_seeded_state_and_vision_metadata(tmp_pa
     report_text = (tmp_path / "out" / "customer_report.md").read_text(encoding="utf-8")
     assert "secret" not in seeded_text
     assert "***REDACTED***" in seeded_text
+    assert "18801" in (tmp_path / "out" / "browser_runtime.yaml").read_text(encoding="utf-8")
     assert (tmp_path / "out" / "vision_review.yaml").exists()
     assert "Visual Evidence Review" in report_text
     assert "no model visual judgment" in report_text
+    assert "CDP port: 18801" in report_text
+
+
+def test_deterministic_screenshot_reviewer_groups_captures_and_reads_png_dimensions(tmp_path: Path):
+    before = tmp_path / "before.png"
+    after = tmp_path / "after.png"
+    before.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + (390).to_bytes(4, "big") + (844).to_bytes(4, "big"))
+    after.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + (390).to_bytes(4, "big") + (844).to_bytes(4, "big"))
+
+    review = DeterministicScreenshotReviewer().review([
+        ScreenshotCaptureRecord(path=str(before), route="/reports", action="submit", success=True, sha256="before"),
+        ScreenshotCaptureRecord(path=str(after), route="/reports", action="submit", success=True, sha256="after"),
+    ])
+
+    assert review.screenshot_count == 2
+    assert review.review_kind == "heuristic"
+    assert review.groups[0].group_id == "/reports:submit"
+    assert review.groups[0].screenshots[0].width == 390
+    assert review.groups[0].screenshots[0].height == 844
+    assert "Hash changed within this screenshot group." in review.groups[0].notes
+    assert "1 screenshot group(s) changed by hash across before/after captures." in review.heuristics
+    assert review.judgment_summary.endswith("no model visual judgment was performed.")
+
+
+def test_deterministic_screenshot_reviewer_surfaces_missing_and_blank_capture_blockers(tmp_path: Path):
+    missing = tmp_path / "missing.png"
+
+    review = DeterministicScreenshotReviewer().review([
+        ScreenshotCaptureRecord(path=str(missing), route="/", action="observe", success=True),
+        ScreenshotCaptureRecord(path="", route="/", action="blank", success=True, width=0, height=0),
+    ])
+
+    assert review.screenshot_count == 2
+    assert review.review_kind == "heuristic"
+    assert "2 screenshot capture(s) missing or failed." in review.blockers
+    assert "1 screenshot capture(s) had zero dimensions." in review.blockers
+    assert any("At least one capture failed." in group.notes for group in review.groups)

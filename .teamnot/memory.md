@@ -65,3 +65,55 @@ Decisions worth remembering:
 - Future LLM-based customer-report synthesis can be added later, but it should
   remain optional and behind a worker boundary so deterministic tests and local
   safety remain the default.
+
+## Customer Researcher Hardening Pass — 2026-05-22
+
+Patterns applied:
+
+- Customer Loop was hardened as a portable research contract: seeded state,
+  browser runtime metadata, screenshot captures, vision review, action memory,
+  persona/JTBD panels, domain oracles, and iteration coverage are represented as
+  typed artifacts rather than loose report text.
+- The real browser path stayed behind the Windows/CDP adapter. Core TeamNoT
+  imports still do not require OpenClaw, Windows, Chrome, Playwright,
+  Browserbase, or any metered model runtime.
+- Screenshot review now has an honest deterministic baseline: metadata, hashes,
+  dimensions, grouping, and capture-quality heuristics are written separately
+  from DOM/text evidence and are not described as model visual judgment.
+- The researcher loop records route/action memory and iteration coverage so
+  broad exploration, no-op suppression, replay detection, and next-branch
+  choices can be audited after a run.
+- Dogfood covered both Bulletproof React and the Shopify CSV Preflight target,
+  producing browser runtime, screenshot capture, vision review, research memory,
+  persona/JTBD, domain-oracle, and iteration coverage artifacts.
+
+Gotchas discovered:
+
+- Previous replay detection only compared adjacent iterations; the fix compares
+  against the full prior iteration history so non-adjacent repeats are marked as
+  replayed instead of new evidence.
+- Browser evidence can be present but hidden if reports only print selected
+  evidence summaries. The report writer now prints evidence kinds so
+  `browser_research_brain` is visible in customer reports and DoD checks.
+- Seeded authentication is a contract plus adapter hook, not a universal
+  guarantee. Adapters may still report unsupported storage-state import or app
+  login blockers, and artifacts must preserve that distinction.
+- Deterministic visual review is useful for proving screenshots exist and
+  changed, but it cannot judge visual quality. Reports must keep using
+  `metadata_only`/`heuristic` wording unless a future worker performs real visual
+  judgment.
+- Real-browser smoke depends on the local Windows CDP session on port 18801 and
+  should remain an integration command outside ordinary unit tests.
+
+Decisions worth remembering:
+
+- Treat the current customer researcher as beta/internal dogfood, not a finished
+  production feature, until seeded post-auth coverage and optional model/vision
+  review have more field validation.
+- Keep `browser_runtime.yaml`, `screenshot_captures.yaml`,
+  `vision_review.yaml`, `research_action_memory.yaml`, and
+  `iteration_coverage.yaml` as first-class audit artifacts for browser-capable
+  customer-loop runs.
+- Preserve the safe default: no metered model calls, deterministic unit tests,
+  and `--no-run-teamnot` unless recursive TeamNoT execution is explicitly
+  requested.

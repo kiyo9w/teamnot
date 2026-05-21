@@ -13,6 +13,7 @@ from teamnot.customer_loop import (
     CustomerSeverity,
     CustomerTestPlan,
     ExperienceTarget,
+    ResearchActionMemory,
     select_next_best_move,
 )
 from teamnot.customer_loop.orchestrator import default_customer_test_plan
@@ -28,6 +29,23 @@ def _report(findings: list[CustomerFinding]) -> CustomerReport:
     config = CustomerLoopConfig(target=target, profile=_profile(), out_dir=Path("."))
     plan: CustomerTestPlan = default_customer_test_plan(config)
     return CustomerReport(profile=_profile(), target=target, plan=plan, findings=findings)
+
+
+def _covered_report(finding_id: str, route: str, action: str, screenshot: str) -> CustomerReport:
+    report = _report([
+        CustomerFinding(id=finding_id, title=f"{finding_id} issue", severity=CustomerSeverity.high)
+    ])
+    report.evidence = [
+        CustomerEvidence(
+            kind="browser_research_brain",
+            screenshot_paths=[screenshot],
+            metadata={"research_brain": {"routes_discovered": [route]}},
+        )
+    ]
+    report.action_memory = [
+        ResearchActionMemory(route=route, chosen_action=action, learned_signal="observable change")
+    ]
+    return report
 
 
 def test_critical_finding_outranks_high_trust_blocker():
@@ -289,6 +307,30 @@ def test_orchestrator_retries_different_findings_until_max_iterations(tmp_path: 
     assert result.iterations_completed == 2
     assert result.selected_finding is not None
     assert result.stopped_reason == "max iterations reached"
+
+
+def test_orchestrator_marks_non_adjacent_iteration_replay_as_not_new_evidence(tmp_path: Path):
+    runner = _SequenceRunner([
+        _covered_report("first", "/reports", "run-report", "screenshots/reports-run.png"),
+        _covered_report("second", "/settings/team", "invite-user", "screenshots/team-invite.png"),
+        _covered_report("first", "/reports", "run-report", "screenshots/reports-run.png"),
+    ])
+
+    config = CustomerLoopConfig(
+        target=ExperienceTarget(url="https://example-product.test"),
+        profile=_profile(),
+        out_dir=tmp_path / "out",
+        max_iterations=3,
+        severity_threshold=CustomerSeverity.medium,
+        run_teamnot=True,
+    )
+    result = _LoopOrchestrator(runner, run_teamnot_hook=lambda path: None).run(config)
+
+    assert result.iterations_completed == 3
+    assert result.iteration_coverage[2].new_evidence is False
+    assert result.iteration_coverage[2].replayed is True
+    summary = (tmp_path / "out" / "loop_summary.md").read_text(encoding="utf-8")
+    assert "Iteration 3: new_evidence=False, replayed=True" in summary
 
 
 def test_orchestrator_writes_summary_when_teamnot_invocation_fails(tmp_path: Path):
