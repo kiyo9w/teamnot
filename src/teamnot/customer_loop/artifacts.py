@@ -220,9 +220,17 @@ def render_loop_summary(result: CustomerLoopResult) -> str:
         f"Iterations completed: {result.iterations_completed}",
         f"Stopped reason: {result.stopped_reason}",
         f"TeamNoT invoked: {'yes' if result.teamnot_invoked else 'no'}",
+    ]
+    if result.iteration_out_dirs:
+        lines.extend([
+            "",
+            "## Iteration Artifacts",
+            *[f"- {path}" for path in result.iteration_out_dirs],
+        ])
+    lines.extend([
         "",
         "## Next Best Move",
-    ]
+    ])
     if selected:
         lines.extend([
             f"{selected.severity.value.upper()}: {selected.title}",

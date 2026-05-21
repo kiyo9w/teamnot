@@ -16,6 +16,7 @@ from teamnot.customer_loop import (
     select_next_best_move,
 )
 from teamnot.customer_loop.orchestrator import default_customer_test_plan
+from teamnot.customer_loop.runners import ExperienceRunner
 
 
 def _profile() -> CustomerProfile:
@@ -145,3 +146,76 @@ def test_generated_brief_sanitizes_finding_id_for_git_branch(tmp_path: Path):
     generated = generate_followup_brief(result.report, result.report.findings[0], tmp_path / "out")
     assert generated.task_id == "CUSTOMER-LOOP-BAD-ID-LOCK"
     assert generated.yaml["deliverable"]["branch"] == "feature/customer-loop-bad-id-lock"
+
+
+class _SequenceRunner(ExperienceRunner):
+    def __init__(self, reports: list[CustomerReport]):
+        self.reports = reports
+        self.out_dirs: list[Path] = []
+
+    def run(self, target, profile, plan, out_dir):
+        self.out_dirs.append(out_dir)
+        index = min(len(self.out_dirs) - 1, len(self.reports) - 1)
+        return self.reports[index]
+
+
+class _LoopOrchestrator(CustomerLoopOrchestrator):
+    def __init__(self, runner: ExperienceRunner, run_teamnot_hook=None):
+        super().__init__(run_teamnot_hook=run_teamnot_hook)
+        self.runner = runner
+
+    def _runner(self, config):
+        return self.runner
+
+
+def test_orchestrator_can_invoke_teamnot_and_retest_until_clean(tmp_path: Path):
+    finding = CustomerFinding(
+        id="accessibility",
+        title="Interactive controls lack accessible names",
+        severity=CustomerSeverity.medium,
+        recommendation="Add accessible names.",
+    )
+    dirty = _report([finding])
+    clean = _report([])
+    runner = _SequenceRunner([dirty, clean])
+    invoked: list[Path] = []
+
+    config = CustomerLoopConfig(
+        target=ExperienceTarget(url="https://example-product.test"),
+        profile=_profile(),
+        out_dir=tmp_path / "out",
+        max_iterations=3,
+        severity_threshold=CustomerSeverity.medium,
+        run_teamnot=True,
+    )
+    result = _LoopOrchestrator(runner, run_teamnot_hook=invoked.append).run(config)
+
+    assert result.iterations_completed == 2
+    assert result.selected_finding is None
+    assert result.teamnot_invoked is True
+    assert result.stopped_reason == "no finding met severity threshold"
+    assert len(invoked) == 1
+    assert invoked[0].name == "generated_brief.yaml"
+    assert [path.name for path in result.iteration_out_dirs] == ["iteration-01", "iteration-02"]
+    assert (tmp_path / "out" / "iteration-01" / "generated_brief.yaml").exists()
+    assert (tmp_path / "out" / "iteration-02" / "customer_report.md").exists()
+    assert "iteration-01" in (tmp_path / "out" / "loop_summary.md").read_text(encoding="utf-8")
+
+
+def test_orchestrator_stops_at_max_iterations_when_findings_remain(tmp_path: Path):
+    finding = CustomerFinding(id="blocking", title="Still blocked", severity=CustomerSeverity.high)
+    runner = _SequenceRunner([_report([finding]), _report([finding])])
+
+    config = CustomerLoopConfig(
+        target=ExperienceTarget(url="https://example-product.test"),
+        profile=_profile(),
+        out_dir=tmp_path / "out",
+        max_iterations=2,
+        severity_threshold=CustomerSeverity.medium,
+        run_teamnot=True,
+    )
+    result = _LoopOrchestrator(runner, run_teamnot_hook=lambda path: None).run(config)
+
+    assert result.iterations_completed == 2
+    assert result.selected_finding is not None
+    assert result.stopped_reason == "max iterations reached"

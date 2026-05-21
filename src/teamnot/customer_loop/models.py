@@ -160,3 +160,4 @@ class CustomerLoopResult(BaseModel):
     stopped_reason: str = ""
     iterations_completed: int = 1
     teamnot_invoked: bool = False
+    iteration_out_dirs: list[Path] = Field(default_factory=list)

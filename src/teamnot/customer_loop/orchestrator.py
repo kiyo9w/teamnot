@@ -45,30 +45,54 @@ class CustomerLoopOrchestrator:
         out_dir = ensure_artifact_dirs(config.out_dir)
         plan = default_customer_test_plan(config)
         runner = self._runner(config)
-        report = runner.run(config.target, config.profile, plan, out_dir)
-        write_report_artifacts(out_dir, config.profile, plan, report)
-        selected = select_next_best_move(report, config.severity_threshold)
+        report: CustomerReport | None = None
+        selected: CustomerFinding | None = None
         generated = None
         teamnot_invoked = False
         stopped_reason = "no finding met severity threshold"
-        if selected:
+        iteration_out_dirs: list[Path] = []
+        iterations_completed = 0
+
+        for iteration in range(1, config.max_iterations + 1):
+            iteration_dir = _iteration_dir(out_dir, iteration, config.max_iterations)
+            iteration_out_dirs.append(iteration_dir)
+            report = runner.run(config.target, config.profile, plan, iteration_dir)
+            write_report_artifacts(iteration_dir, config.profile, plan, report)
+            selected = select_next_best_move(report, config.severity_threshold)
+            generated = None
+            iterations_completed = iteration
+            if not selected:
+                stopped_reason = "no finding met severity threshold"
+                break
             previous = load_brief(config.previous_brief_path) if config.previous_brief_path else None
-            generated = generate_followup_brief(report, selected, out_dir, previous)
-            brief_path = write_generated_brief(out_dir, generated)
+            generated = generate_followup_brief(report, selected, iteration_dir, previous)
+            brief_path = write_generated_brief(iteration_dir, generated)
             stopped_reason = "generated follow-up brief"
-            if config.run_teamnot:
-                if self.run_teamnot_hook:
-                    self.run_teamnot_hook(brief_path)
-                teamnot_invoked = True
-                stopped_reason = "generated follow-up brief and invoked TeamNoT"
+            if not config.run_teamnot:
+                break
+            if self.run_teamnot_hook:
+                self.run_teamnot_hook(brief_path)
+            teamnot_invoked = True
+            stopped_reason = "generated follow-up brief and invoked TeamNoT"
+        else:
+            stopped_reason = "max iterations reached"
+
+        if report is None:
+            raise RuntimeError("customer-loop did not execute any iterations")
+
+        if config.max_iterations > 1 and generated:
+            write_generated_brief(out_dir, generated)
+        if config.max_iterations > 1:
+            write_report_artifacts(out_dir, config.profile, plan, report)
         result = CustomerLoopResult(
             out_dir=out_dir,
             report=report,
             selected_finding=selected,
             generated_brief=generated,
             stopped_reason=stopped_reason,
-            iterations_completed=1,
+            iterations_completed=iterations_completed,
             teamnot_invoked=teamnot_invoked,
+            iteration_out_dirs=iteration_out_dirs,
         )
         write_loop_summary(result)
         return result
@@ -83,6 +107,12 @@ class CustomerLoopOrchestrator:
         if config.runner == CustomerLoopRunnerName.openclaw_windows_interactive:
             return OpenClawWindowsInteractiveRunner()
         return OpenClawWindowsCDPRunner()
+
+
+def _iteration_dir(out_dir: Path, iteration: int, max_iterations: int) -> Path:
+    if max_iterations <= 1:
+        return out_dir
+    return out_dir / f"iteration-{iteration:02d}"
 
 
 def select_next_best_move(
