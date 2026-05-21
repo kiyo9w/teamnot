@@ -149,6 +149,9 @@ class OpenClawWindowsCDPRunner:
             ),
         )
 
+    def _screenshot(self, path: Path) -> None:
+        self._run(["--action", "screenshot", "--out", _path_for_windows_wrapper(path)])
+
     def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         command = [str(self.wrapper_path), *args]
         try:
@@ -179,7 +182,61 @@ class OpenClawWindowsCDPRunner:
 
     @staticmethod
     def _default_runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+        return subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+
+
+class OpenClawWindowsInteractiveRunner(OpenClawWindowsCDPRunner):
+    """Run the baseline CDP probe plus a generic customer-visible interaction."""
+
+    def run(
+        self,
+        target: ExperienceTarget,
+        profile: CustomerProfile,
+        plan: CustomerTestPlan,
+        out_dir: Path,
+    ) -> CustomerReport:
+        report = super().run(target, profile, plan, out_dir)
+        if report.evidence:
+            report.evidence[0].metadata["runner"] = "openclaw-windows-interactive"
+            report.evidence[0].metadata["method"] = (
+                "real Windows Chrome/CDP customer-readiness probe plus sample/demo interaction"
+            )
+        screenshots = out_dir / "screenshots"
+        before = screenshots / "interactive-before.png"
+        after = screenshots / "interactive-after.png"
+        self._try_run(["--action", "viewport", "--width", "1280", "--height", "900"])
+        self._screenshot(before)
+        interaction = _parse_json_stdout(
+            self._run(["--action", "eval", "--expr", _INTERACTIVE_SAMPLE_FLOW_JS])
+        ).get("result", {})
+        self._screenshot(after)
+        markers, findings = _build_interactive_findings(interaction if isinstance(interaction, dict) else {})
+        evidence = CustomerEvidence(
+            kind="browser_interaction",
+            path=str(before),
+            screenshot_paths=[str(before), str(after)],
+            observed_behavior=_summarize_interaction(interaction if isinstance(interaction, dict) else {}, markers),
+            raw_excerpt="\n".join(markers),
+            metadata={
+                "runner": "openclaw-windows-interactive",
+                "rubric": "customer-testing-openclaw",
+                "method": "baseline probe plus real sample/demo click with before/after evidence",
+                "interaction": interaction,
+            },
+        )
+        report.evidence.append(evidence)
+        for finding in findings:
+            finding.evidence.append(evidence)
+        report.findings.extend(findings)
+        report.scores = _score_customer_readiness(
+            report.evidence[0].metadata.get("probe", {}) if report.evidence else {},
+            report.findings,
+        )
+        report.summary = (
+            "Customer-testing-openclaw interactive browser test completed with Windows CDP. "
+            f"{len(report.findings)} customer-impact finding(s) identified."
+        )
+        return report
 
 
 def _first_nonempty_line(text: str) -> str:
@@ -218,7 +275,7 @@ def _resolve_wrapper_path(wrapper_path: str | Path) -> Path:
 def _path_for_windows_wrapper(path: Path) -> str:
     expanded = path.expanduser()
     if not expanded.is_absolute():
-        return str(expanded)
+        expanded = expanded.resolve()
     try:
         converted = subprocess.run(
             ["wslpath", "-w", str(expanded)],
@@ -327,6 +384,62 @@ _MOBILE_PROBE_JS = r"""(() => {
       .slice(0, 8)
       .map((el) => textOf(el))
       .filter(Boolean),
+  };
+})()"""
+
+_INTERACTIVE_SAMPLE_FLOW_JS = r"""(async () => {
+  const textOf = (el) => (el?.innerText || el?.textContent || "").replace(/\s+/g, " ").trim();
+  const state = (label) => {
+    const bodyText = textOf(document.body);
+    const download = Array.from(document.querySelectorAll("button,a,input"))
+      .find((el) => /download|export|report/i.test(textOf(el) || el.value || el.getAttribute("aria-label") || ""));
+    return {
+      label,
+      title: document.title,
+      bodyTextLength: bodyText.length,
+      bodyTextSample: bodyText.slice(0, 2000),
+      statusText: textOf(document.querySelector("#status,[role=status],.status,.alert,.error")),
+      resultText: textOf(document.querySelector("#verdict,#result,#results,.result,.results,.report,.report-preview")),
+      downloadEnabled: download ? !Boolean(download.disabled || download.getAttribute("aria-disabled") === "true") : false,
+      downloadText: download ? textOf(download) || download.value || download.getAttribute("aria-label") || "" : "",
+      buttons: Array.from(document.querySelectorAll("button,[role=button],input[type=submit],a[href]"))
+        .slice(0, 20)
+        .map((el) => textOf(el) || el.value || el.getAttribute("aria-label") || "")
+        .filter(Boolean),
+    };
+  };
+  const before = state("before");
+  const actionTextOf = (el) => textOf(el) || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || "";
+  const primaryCandidates = Array.from(document.querySelectorAll("button,[role=button],input[type=submit]"));
+  const linkCandidates = Array.from(document.querySelectorAll("a[href]"))
+    .filter((el) => /run sample|run demo|try sample|try demo/i.test(actionTextOf(el)));
+  const candidates = [...primaryCandidates, ...linkCandidates];
+  const sample = candidates.find((el) => /run sample|run demo|try sample|try demo|sample report|demo report/i.test(actionTextOf(el)))
+    || primaryCandidates.find((el) => /sample|demo|example/i.test(actionTextOf(el)));
+  if (!sample) {
+    return { action: "sample-demo", clicked: false, reason: "no sample/demo action found", before };
+  }
+  const actionText = actionTextOf(sample);
+  sample.click();
+  let after = state("after-click");
+  const start = Date.now();
+  while (Date.now() - start < 10000) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    after = state("after-wait");
+    if (
+      after.downloadEnabled ||
+      /completed|complete|done|success|verdict|blocker|warning|next action|report/i.test(after.bodyTextSample + " " + after.statusText + " " + after.resultText)
+    ) {
+      break;
+    }
+  }
+  return {
+    action: "sample-demo",
+    clicked: true,
+    actionText,
+    before,
+    after,
+    changed: after.bodyTextLength !== before.bodyTextLength || after.statusText !== before.statusText || after.resultText !== before.resultText,
   };
 })()"""
 
@@ -731,6 +844,70 @@ def _summarize_probe(probe: dict, markers: list[str]) -> str:
         f"Rich customer browser probe completed for {probe.get('url', '')}. "
         f"Title: {probe.get('title', '')}. Headings: {headings or 'none'}. "
         f"Markers: {passed} pass, {failed} fail."
+    )
+
+
+def _build_interactive_findings(interaction: dict) -> tuple[list[str], list[CustomerFinding]]:
+    markers: list[str] = []
+    findings: list[CustomerFinding] = []
+    if not interaction.get("clicked"):
+        reason = interaction.get("reason", "no interactive action was executed")
+        markers.append(f"STEP_SKIP|interactive-sample-flow|{reason}")
+        findings.append(_browser_finding(
+            "interactive-flow-not-available",
+            "No sample or demo action is available for automated customer flow testing",
+            CustomerSeverity.low,
+            "The customer has no quick, low-risk way to see the product produce value.",
+            "Time-to-value and evaluation confidence are weaker without a sample path.",
+            "Every first-time evaluation where the customer does not have prepared input.",
+            "Add a sample/demo action or provide a task-specific interactive runner configuration.",
+        ))
+        return markers, findings
+
+    after = interaction.get("after", {}) if isinstance(interaction.get("after"), dict) else {}
+    produced_result = bool(
+        after.get("downloadEnabled")
+        or re.search(
+            r"completed|complete|done|success|verdict|blocker|warning|next action|report",
+            " ".join(str(after.get(key, "")) for key in ("bodyTextSample", "statusText", "resultText")),
+            re.I,
+        )
+    )
+    if produced_result:
+        markers.append(
+            "STEP_PASS|interactive-sample-flow|"
+            f"clicked {interaction.get('actionText', 'sample/demo')} and observed result/download cues"
+        )
+    else:
+        markers.append(
+            "STEP_FAIL|interactive-sample-flow|"
+            "expected visible result/download cues after sample/demo click -> none detected"
+        )
+        findings.append(_browser_finding(
+            "interactive-sample-flow-no-result",
+            "Sample or demo action does not produce a visible customer result",
+            CustomerSeverity.high,
+            "The customer clicks a low-risk first action but does not get clear proof of value.",
+            "Activation is blocked because the first interactive path fails to create an understandable result.",
+            "Every first-time user relying on the sample path.",
+            "Make the sample/demo action render a visible result, next actions, and report/download cue.",
+            core=True,
+        ))
+    return markers, findings
+
+
+def _summarize_interaction(interaction: dict, markers: list[str]) -> str:
+    failed = len([marker for marker in markers if marker.startswith("STEP_FAIL|")])
+    passed = len([marker for marker in markers if marker.startswith("STEP_PASS|")])
+    skipped = len([marker for marker in markers if marker.startswith("STEP_SKIP|")])
+    if interaction.get("clicked"):
+        return (
+            f"Interactive sample/demo flow clicked {interaction.get('actionText', 'an action')}. "
+            f"Markers: {passed} pass, {failed} fail, {skipped} skip."
+        )
+    return (
+        f"Interactive sample/demo flow skipped: {interaction.get('reason', 'no action found')}. "
+        f"Markers: {passed} pass, {failed} fail, {skipped} skip."
     )
 
 

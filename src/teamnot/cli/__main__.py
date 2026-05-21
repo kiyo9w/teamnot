@@ -56,6 +56,7 @@ from teamnot.customer_loop import (
     ExperienceTarget,
     ManualEvidenceRunner,
     OpenClawWindowsCDPRunner,
+    OpenClawWindowsInteractiveRunner,
     default_customer_test_plan,
     load_model,
     write_report_artifacts,
@@ -341,7 +342,7 @@ SEVERITY_CHOICES = ["critical", "high", "medium"]
               required=True, help="Output artifact directory.")
 @click.option("--runner", type=click.Choice(RUNNER_CHOICES), default=CustomerLoopRunnerName.manual.value,
               show_default=True,
-              help="manual ingests an existing report; openclaw-windows-cdp runs a rich browser/customer probe.")
+              help="manual ingests an existing report; openclaw-windows-cdp probes readiness; openclaw-windows-interactive also clicks a sample/demo flow.")
 @click.option("--evidence", "evidence_path", type=click.Path(exists=False, dir_okay=False, path_type=Path),
               default=None, help="Existing evidence file for manual mode.")
 def customer_test(
@@ -364,11 +365,7 @@ def customer_test(
         plan = default_customer_test_plan(config)
         if CustomerLoopRunnerName(runner) == CustomerLoopRunnerName.manual and evidence_path is None:
             raise CustomerLoopRunnerError("--evidence is required for manual customer-test mode")
-        experience_runner = (
-            ManualEvidenceRunner(evidence_path)
-            if CustomerLoopRunnerName(runner) == CustomerLoopRunnerName.manual
-            else OpenClawWindowsCDPRunner()
-        )
+        experience_runner = _customer_loop_runner(CustomerLoopRunnerName(runner), evidence_path)
         report = experience_runner.run(target_model, profile, plan, out_dir)
         write_report_artifacts(out_dir, profile, plan, report)
     except CustomerLoopError as e:
@@ -389,7 +386,7 @@ def customer_test(
 @click.option("--run-teamnot/--no-run-teamnot", default=False, show_default=True)
 @click.option("--runner", type=click.Choice(RUNNER_CHOICES), default=CustomerLoopRunnerName.manual.value,
               show_default=True,
-              help="manual ingests an existing report; openclaw-windows-cdp runs a rich browser/customer probe.")
+              help="manual ingests an existing report; openclaw-windows-cdp probes readiness; openclaw-windows-interactive also clicks a sample/demo flow.")
 @click.option("--evidence", "evidence_path", type=click.Path(exists=False, dir_okay=False, path_type=Path),
               default=None, help="Existing evidence file for manual mode.")
 @click.option("--previous-brief", "previous_brief_path",
@@ -432,6 +429,16 @@ def customer_loop(
     else:
         console.print("[yellow]No follow-up brief generated; no blocker met the threshold.[/yellow]")
     console.print(f"[green]Customer loop artifacts written:[/green] {out}")
+
+
+def _customer_loop_runner(runner: CustomerLoopRunnerName, evidence_path: Path | None):
+    if runner == CustomerLoopRunnerName.manual:
+        if evidence_path is None:
+            raise CustomerLoopRunnerError("--evidence is required for manual customer-loop mode")
+        return ManualEvidenceRunner(evidence_path)
+    if runner == CustomerLoopRunnerName.openclaw_windows_interactive:
+        return OpenClawWindowsInteractiveRunner()
+    return OpenClawWindowsCDPRunner()
 
 
 def _invoke_teamnot_run(brief_path: Path) -> None:

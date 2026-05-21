@@ -32,6 +32,7 @@ class CustomerSeverity(str, Enum):
 class CustomerLoopRunnerName(str, Enum):
     manual = "manual"
     openclaw_windows_cdp = "openclaw-windows-cdp"
+    openclaw_windows_interactive = "openclaw-windows-interactive"
 
 
 class CustomerProfile(BaseModel):

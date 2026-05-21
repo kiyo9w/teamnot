@@ -37,6 +37,7 @@ from teamnot.customer_loop.runners import (
     ExperienceRunner,
     ManualEvidenceRunner,
     OpenClawWindowsCDPRunner,
+    OpenClawWindowsInteractiveRunner,
 )
 
 __all__ = [
@@ -61,6 +62,7 @@ __all__ = [
     "GeneratedBrief",
     "ManualEvidenceRunner",
     "OpenClawWindowsCDPRunner",
+    "OpenClawWindowsInteractiveRunner",
     "default_customer_test_plan",
     "ensure_artifact_dirs",
     "generate_followup_brief",

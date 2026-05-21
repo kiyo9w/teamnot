@@ -24,4 +24,6 @@ notes: >
   screenshots plus customer-testing-openclaw markers across promise clarity,
   core workflow, output actionability, error recovery, trust/data handling,
   adoption cues, domain fit, time-to-value, mobile, accessibility, layout,
-  resource health, buyer/user mismatch, and emotional confidence.
+  resource health, buyer/user mismatch, and emotional confidence. Use --runner
+  openclaw-windows-interactive when the product exposes a sample/demo action and
+  you want before/after evidence from a real click.

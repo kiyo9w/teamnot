@@ -20,7 +20,11 @@ from teamnot.customer_loop.models import (
     CustomerReport,
     CustomerSeverity,
 )
-from teamnot.customer_loop.runners import ManualEvidenceRunner, OpenClawWindowsCDPRunner
+from teamnot.customer_loop.runners import (
+    ManualEvidenceRunner,
+    OpenClawWindowsCDPRunner,
+    OpenClawWindowsInteractiveRunner,
+)
 
 RunTeamNoT = Callable[[Path], None]
 
@@ -76,6 +80,8 @@ class CustomerLoopOrchestrator:
 
                 raise CustomerLoopRunnerError("--evidence is required for manual customer-loop mode")
             return ManualEvidenceRunner(config.evidence_path)
+        if config.runner == CustomerLoopRunnerName.openclaw_windows_interactive:
+            return OpenClawWindowsInteractiveRunner()
         return OpenClawWindowsCDPRunner()
 
 

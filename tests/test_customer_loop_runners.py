@@ -13,6 +13,7 @@ from teamnot.customer_loop import (
     ExperienceTarget,
     ManualEvidenceRunner,
     OpenClawWindowsCDPRunner,
+    OpenClawWindowsInteractiveRunner,
 )
 from teamnot.customer_loop.artifacts import render_customer_report
 from teamnot.customer_loop.models import CustomerLoopConfig
@@ -245,6 +246,104 @@ def test_openclaw_runner_wraps_timeout_as_customer_loop_error(tmp_path: Path):
         runner.run(target, profile, plan, tmp_path / "out")
 
 
+def test_openclaw_interactive_runner_clicks_sample_flow(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def command_runner(command):
+        commands.append(list(command))
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        expr = command[-1] if "--expr" in command else ""
+        if action == "navigate":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "title": "Mock"}', stderr="")
+        if action == "viewport":
+            width = command[command.index("--width") + 1] if "--width" in command else "1280"
+            height = command[command.index("--height") + 1] if "--height" in command else "900"
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=f'{{"ok": true, "viewport": {{"width": {width}, "height": {height}}}}}',
+                stderr="",
+            )
+        if action == "eval" and "sample-demo" in expr:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"ok": true, "result": {'
+                    '"action": "sample-demo",'
+                    '"clicked": true,'
+                    '"actionText": "Run sample report",'
+                    '"changed": true,'
+                    '"before": {"bodyTextLength": 100, "statusText": ""},'
+                    '"after": {"bodyTextLength": 500, "statusText": "Completed", "downloadEnabled": true, "resultText": "Verdict"}'
+                    "}}"
+                ),
+                stderr="",
+            )
+        if action == "eval" and any(
+            cmd[2] == "viewport" and "--width" in cmd and cmd[cmd.index("--width") + 1] == "390"
+            for cmd in commands if len(cmd) > 2
+        ):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"ok": true, "result": {'
+                    '"url": "https://example-product.test",'
+                    '"viewport": {"width": 390, "height": 844},'
+                    '"hasHorizontalOverflow": false,'
+                    '"bodyTextLength": 300,'
+                    '"firstActions": ["Run sample report"]'
+                    "}}"
+                ),
+                stderr="",
+            )
+        if action == "eval":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"ok": true, "result": {'
+                    '"url": "https://example-product.test",'
+                    '"title": "Mock Product",'
+                    '"headings": ["Mock Product"],'
+                    '"buttons": ["Run sample report"],'
+                    '"inputs": [{"tag": "input", "type": "file", "text": "", "label": "CSV file"}],'
+                    '"forms": [{"text": "Upload CSV file and run sample report", "controls": 2}],'
+                    '"links": [],'
+                    '"primaryActionText": ["Run sample report", "Download report"],'
+                    '"bodyText": "For agency operators with risky CSV workflow problems. Run sample report to generate a report, download and share it with your team, retry invalid files, use sample demo data, see pricing, contact support, and trust that privacy data is local.",'
+                    '"viewport": {"width": 1280, "height": 900},'
+                    '"timingMs": 123,'
+                    '"failedResources": [],'
+                    '"hasHorizontalOverflow": false,'
+                    '"focusableCount": 2,'
+                    '"imagesWithoutAlt": 0,'
+                    '"landmarkCount": 2,'
+                    '"semanticSignals": {'
+                    '"hasPricing": true, "hasSupport": true, "hasPrivacy": true,'
+                    '"hasSample": true, "hasErrorRecovery": true, "hasCollaboration": true'
+                    "}"
+                    "}}"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    target, profile, plan = _plan(tmp_path)
+    report = OpenClawWindowsInteractiveRunner(wrapper_path=wrapper, command_runner=command_runner).run(
+        target, profile, plan, tmp_path / "out"
+    )
+    assert len(report.evidence) == 2
+    assert report.evidence[1].kind == "browser_interaction"
+    assert "STEP_PASS|interactive-sample-flow" in report.evidence[1].raw_excerpt
+    assert "interactive-before.png" in report.evidence[1].screenshot_paths[0]
+    assert report.findings == []
+
+
 def test_manual_evidence_labeled_blocker_fields_override_loose_heuristics(tmp_path: Path):
     evidence = tmp_path / "report.md"
     evidence.write_text(
@@ -310,3 +409,4 @@ def test_manual_evidence_extracts_markdown_label_blocks(tmp_path: Path):
 def test_runner_enum_values_are_stable():
     assert CustomerLoopRunnerName.manual.value == "manual"
     assert CustomerLoopRunnerName.openclaw_windows_cdp.value == "openclaw-windows-cdp"
+    assert CustomerLoopRunnerName.openclaw_windows_interactive.value == "openclaw-windows-interactive"

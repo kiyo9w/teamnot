@@ -19,6 +19,7 @@ def test_customer_test_help_exposes_required_options():
     assert result.exit_code == 0
     for option in ["--target", "--profile", "--out", "--runner", "--evidence"]:
         assert option in result.output
+    assert "openclaw-windows-interactive" in result.output
 
 
 def test_customer_loop_help_exposes_required_options():
@@ -36,6 +37,7 @@ def test_customer_loop_help_exposes_required_options():
         "--evidence",
     ]:
         assert option in result.output
+    assert "openclaw-windows-interactive" in result.output
 
 
 def test_customer_loop_manual_mode_writes_artifacts(tmp_path: Path):

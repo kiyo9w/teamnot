@@ -110,6 +110,13 @@ testing an authenticated workspace can still use manual mode to ingest an even
 richer human/agent report. The built-in OpenClaw runner is now the productized
 customer-readiness probe, not a smoke test fallback.
 
+`OpenClawWindowsInteractiveRunner` is the opt-in browser interaction lane. It
+runs the baseline probe, then looks for a visible sample/demo action, clicks it,
+captures before/after screenshots, and checks whether the click creates visible
+result or download cues. It is still generic: task-specific flows such as
+uploading an arbitrary file, checkout, or authenticated setup should be modeled
+as future configured runners or ingested through manual evidence.
+
 ## Generated Brief Shape
 
 The generated brief includes customer context, evidence references, the selected
