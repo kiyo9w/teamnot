@@ -1,0 +1,271 @@
+schema_version: "2.0"
+
+project:
+  name: teamnot-customer-researcher-utmost
+  path: /home/ngoka/.openclaw/workspace/teamnot
+  language: [python, javascript, markdown, yaml]
+  stack: [click, pydantic, pytest, ruff, playwright-cdp, teamnot, openclaw-windows-adapter]
+  conventions_file: .teamnot/conventions.md
+  memory_file: .teamnot/memory.md
+
+task:
+  id: CUSTOMER-RESEARCHER-UTMOST-20260522
+  title: Push Customer Loop to a production-grade autonomous customer researcher
+  description: |
+    Mission:
+      TeamNoT must make its Customer Loop capability as close as possible to the
+      customer-testing-openclaw skill and, where feasible, better productized.
+      This is the "code while the user sleeps" proof run. Do not treat this as
+      a small bugfix. Treat it as the final hardening pass for a flagship
+      TeamNoT capability.
+
+    Current branch context:
+      - Branch: feature/customer-loop-20260520
+      - Recent commits already added:
+        - product exploration planner
+        - multi-dimensional customer report
+        - agentic customer researcher runner
+        - persistent Windows browser session bridge on CDP port 18801
+      - Latest dogfood target:
+        /home/ngoka/.openclaw/workspace/teamnot-real-eval/public-mvp/bulletproof-react/apps/react-vite
+        running at http://127.0.0.1:3000/
+      - Latest successful artifact:
+        .teamnot/customer-loop/bulletproof-react-eval/persistent-researcher-20260521b/
+      - Latest result:
+        runner no longer tunnels into landing only, no longer reads the React
+        fallback before hydration, and captured 40 screenshots across landing,
+        auth/login, auth/register, empty form submit, filled form submit,
+        switch toggle, flow execution, mobile review, and reports.
+
+    The user's target outcome:
+      - TeamNoT should behave like a real end-user/customer researcher, not like
+        a DOM smoke-test script.
+      - It should use full Windows/CDP/browser capability where available.
+      - It should support screenshots and, ideally, model/vision review over
+        those screenshots.
+      - It should explore broadly instead of tunneling into one landing page.
+      - It should decide new branches each iteration, not replay one fixed
+        script until it passes.
+      - It should support seeded account/state so authenticated apps,
+        dashboards, settings, records, team invites, billing, empty states, and
+        saved state can be tested like a real customer.
+      - It should run customer-test -> orchestrator -> generated TeamNoT brief
+        -> TeamNoT execution -> retest repeatedly until no meaningful customer
+        gaps remain or an honest blocker is reported.
+      - It should produce reports that are multi-dimensional: functional,
+        emotional, social, buyer/user split, trust, domain fit, output
+        correctness, mobile, accessibility, reliability, JTBD switching forces,
+        and next research actions.
+
+    Non-negotiable principles:
+      - Do not make core TeamNoT imports depend on OpenClaw, Windows, Chrome,
+        Playwright, Browserbase, or host-specific runtime. Keep those behind
+        adapters.
+      - Tests must not require a real browser.
+      - Real browser dogfood is required before declaring done, but it should
+        run as an integration/smoke command, not as ordinary unit tests.
+      - Do not overclaim. If a layer is still heuristic, report it as heuristic.
+      - If seeded state/auth cannot be fully automated in one pass, implement
+        the schema, CLI contract, artifact shape, and adapter hooks so the
+        product has a real path to post-auth testing instead of pretending.
+      - Commit coherent milestones frequently.
+
+    Required implementation targets:
+
+    1. Persistent browser runtime polish
+       - Keep or improve the persistent Windows browser session bridge.
+       - Ensure each customer run owns a dedicated CDP port/profile/page or a
+         clearly pinned target.
+       - Ensure SPA hydration/load settling is robust.
+       - Ensure screenshot failures are retried/fallback-captured and surfaced
+         as evidence, not swallowed.
+       - Record browser runtime metadata in artifacts: CDP port, session id,
+         page URL, screenshot method, failed primitive if any.
+
+    2. Seeded auth/state support
+       - Productize seeded state instead of only accepting a path string.
+       - Add a model/schema for seeded customer state that can describe:
+         storageState path, cookies/localStorage if supported, test account
+         email/password, login URL, cleanup/reset notes, workspace id, and
+         safety constraints.
+       - Add CLI/documentation for using seeded state with customer-loop and/or
+         researcher runner.
+       - Add tests proving seeded state is represented in artifacts and changes
+         the "no seeded state" finding behavior.
+       - If actual Playwright storageState import is feasible in the Windows
+         session bridge, implement it. If not, implement the public contract and
+         honest blocker metadata.
+
+    3. Vision/screenshot review pass
+       - Add a vision-review abstraction over captured screenshots without
+         hard-requiring a metered model.
+       - Baseline can be deterministic/manual-local: collect screenshot groups,
+         hash/metadata, and emit a "vision review needed" artifact.
+       - If a subscription/local vision worker is available in the environment,
+         optionally use it behind a worker boundary.
+       - The report must clearly distinguish DOM/text evidence from visual
+         judgment. Do not claim visual judgment when only hashes were compared.
+
+    4. Agentic planner loop
+       - Improve researcher planning from fixed route/action lists toward:
+         observe -> decide next action -> execute -> compare -> reflect ->
+         choose another branch.
+       - It should avoid repeating the same action when no new information was
+         learned.
+       - It should prioritize product/customer actions over nav/devtool/footer.
+       - It should keep an action memory per route/session and include why each
+         action was chosen.
+       - Add tests for branch diversification and no repeated no-op loops.
+
+    5. Multi-persona and JTBD panel
+       - Add a practical way to run or synthesize multiple persona lenses:
+         daily user, buyer/manager, security/platform reviewer, finance/procure
+         when relevant.
+       - Add JTBD forces: push, pull, anxiety, habit, trigger, success metric.
+       - Report conflicts: e.g. daily user likes it but buyer/security blocks.
+       - Keep it deterministic enough for tests; LLM synthesis can be optional.
+
+    6. Domain-output correctness hooks
+       - Add a model and report section for domain fixtures/oracles:
+         expected output, golden file, API check, semantic rubric, or manual
+         checkpoint.
+       - If absent, report an explicit coverage gap instead of only evaluating
+         generic UI.
+
+    7. Continuous loop proof
+       - Ensure customer-loop can genuinely run multiple iterations:
+         customer evidence -> best next move -> generated brief -> teamnot run
+         -> retest -> new branch/action, not just replay the exact old track.
+       - Add artifact fields explaining stop reason, iteration coverage, and
+         whether the new iteration tested new evidence or merely replayed.
+       - Add tests for stop reasons and new-evidence detection.
+
+    8. Dogfood and honest merge gate
+       - Use Bulletproof React local app as the broad external product target.
+       - Run at least one full researcher/customer-loop dogfood after changes.
+       - If possible, run a second dogfood on Shopify CSV or another local
+         target to prove generalization.
+       - The final report must state whether this PR is merge-ready as:
+         production feature, beta/internal dogfood, or still blocked.
+
+    References to read first:
+      - README.md
+      - docs/customer-loop.md
+      - .teamnot/conventions.md
+      - .teamnot/memory.md
+      - .teamnot/customer-loop/bulletproof-react-eval/persistent-researcher-20260521b/customer_report.md
+      - .teamnot/customer-loop/bulletproof-react-eval/persistent-researcher-20260521b/research_brain.yaml
+      - .teamnot/customer-loop/bulletproof-react-eval/persistent-researcher-20260521b/screen_exploration.yaml
+      - src/teamnot/customer_loop/runners.py
+      - src/teamnot/customer_loop/models.py
+      - src/teamnot/customer_loop/orchestrator.py
+      - src/teamnot/customer_loop/flow_planning.py
+      - src/teamnot/customer_loop/artifacts.py
+      - src/teamnot/customer_loop/winbrowser_session.mjs
+      - tests/test_customer_loop_runners.py
+      - tests/test_customer_loop_orchestrator.py
+
+  constraints:
+    no_deploy: true
+    no_main_commit: true
+    no_secrets_in_code: true
+    no_force_push: true
+    no_destructive_git: true
+    extra:
+      - Do not push remote.
+      - Do not edit unrelated subsystems except where necessary for the customer-loop feature.
+      - Do not remove the persistent browser session bridge unless replacing it with something demonstrably better.
+      - Commit coherent milestones with passing targeted tests when feasible.
+      - "Keep artifacts honest: pass/fail/skip must mean what actually happened."
+  references:
+    - README.md
+    - docs/customer-loop.md
+    - .teamnot/conventions.md
+    - .teamnot/memory.md
+    - .teamnot/customer-loop/bulletproof-react-eval/persistent-researcher-20260521b/customer_report.md
+    - .teamnot/customer-loop/bulletproof-react-eval/persistent-researcher-20260521b/research_brain.yaml
+    - .teamnot/customer-loop/bulletproof-react-eval/persistent-researcher-20260521b/screen_exploration.yaml
+    - src/teamnot/customer_loop/runners.py
+    - src/teamnot/customer_loop/models.py
+    - src/teamnot/customer_loop/orchestrator.py
+    - src/teamnot/customer_loop/flow_planning.py
+    - src/teamnot/customer_loop/artifacts.py
+    - src/teamnot/customer_loop/winbrowser_session.mjs
+    - tests/test_customer_loop_runners.py
+    - tests/test_customer_loop_orchestrator.py
+
+definition_of_done:
+  require_all_pass: true
+  llm_judge_required: false
+  checks:
+    - name: ruff passes
+      run: uv run ruff check .
+      expect_exit: 0
+      timeout_s: 180
+    - name: full tests pass
+      run: uv run pytest -q
+      expect_exit: 0
+      timeout_s: 600
+    - name: browser session script parses
+      run: node --check src/teamnot/customer_loop/winbrowser_session.mjs
+      expect_exit: 0
+      timeout_s: 120
+    - name: customer-loop docs mention researcher and seeded state
+      file_contains:
+        docs/customer-loop.md: seeded
+      required: true
+    - name: customer researcher dogfood runs on Bulletproof React
+      run: |
+        rm -rf .teamnot/customer-loop/bulletproof-react-eval/overnight-dod
+        uv run teamnot customer-loop \
+          --target http://127.0.0.1:3000/ \
+          --profile .teamnot/customer-loop/bulletproof-react-eval/customer_profile.yaml \
+          --out .teamnot/customer-loop/bulletproof-react-eval/overnight-dod \
+          --runner openclaw-windows-researcher \
+          --max-iterations 1 \
+          --severity-threshold medium \
+          --no-run-teamnot
+      expect_exit: 0
+      timeout_s: 900
+    - name: dogfood captures researcher evidence
+      file_contains:
+        .teamnot/customer-loop/bulletproof-react-eval/overnight-dod/customer_report.md: "browser_research_brain"
+      required: true
+    - name: final handover exists
+      file_exists: .teamnot/reports/CUSTOMER-RESEARCHER-UTMOST-20260522.md
+      required: true
+
+deliverable:
+  type: feature_branch
+  branch: feature/customer-researcher-utmost-20260522
+  base: feature/customer-loop-20260520
+  push_remote: false
+  report_to: file
+  report_path: .teamnot/reports/CUSTOMER-RESEARCHER-UTMOST-20260522.md
+  webhook_url: null
+  telegram_chat_id: null
+
+budget:
+  max_minutes: 720
+  max_usd: 0.0
+  max_retries: 20
+  max_dod_attempts: 50
+  cost_guard_enabled: true
+  cost_warn_pct: 0.7
+  cost_pause_pct: 0.9
+  cost_hard_stop_pct: 1.0
+  require_explicit_api_optin: true
+  allowed_metered_workers: []
+
+notes: |
+  This is an overnight self-improvement lane. Prefer subscription workers:
+  Claude CLI first, Codex fallback when Claude errors, times out, rate-limits,
+  or reaches usage limits. Do not use metered API workers.
+
+  The final standard is not "tests pass"; it is an honest, production-grade
+  customer-researcher capability that is general across product types and does
+  not overclaim browser/customer evidence.
+metadata:
+  owner: "Ngô Trung"
+  lane: overnight-self-improvement
+  requested_at: "2026-05-22T01:08:00+07:00"
