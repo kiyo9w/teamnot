@@ -171,6 +171,8 @@ def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):
     assert any(cmd[1:3] == ["--action", "screenshot"] for cmd in commands)
     assert report.evidence[0].kind == "browser_observation"
     assert "first-impression" in report.evidence[0].raw_excerpt
+    assert "STEP_SKIP|primary-workflow" in report.evidence[0].raw_excerpt
+    assert "STEP_PASS|planned-task" not in report.evidence[0].raw_excerpt
     assert report.findings == []
     assert report.scores.trust_readiness >= 8
 
@@ -298,6 +300,11 @@ def test_manual_evidence_extracts_markdown_label_blocks(tmp_path: Path):
 
     rendered = render_customer_report(report)
     assert "- Recommendation:\n  - Reject upload filenames" in rendered
+    assert "## Method" in rendered
+    assert "## Persona Tested" in rendered
+    assert "## Test Plan" in rendered
+    assert "## Customer Objections" in rendered
+    assert "## Recommended Next Iteration" in rendered
 
 
 def test_runner_enum_values_are_stable():

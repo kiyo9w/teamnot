@@ -594,11 +594,27 @@ def _build_customer_findings(
         markers.append("STEP_PASS|resource-health|no obvious failed resources detected via performance entries")
 
     for task in plan.tasks:
-        markers.append(f"STEP_PASS|planned-task|{task.id}: {task.title}")
-    markers.append("STEP_PASS|jtbd-forces|push/pull/anxiety/habit/trigger checked through customer-readiness heuristics")
-    markers.append("STEP_PASS|buyer-user-mismatch|buyer/operator adoption cues checked")
-    markers.append("STEP_PASS|emotional-confidence|trust, recovery, output, and domain-fit cues checked")
-    markers.append(f"STEP_PASS|customer-context|persona={profile.persona}; target={target.url}")
+        markers.append(
+            "STEP_SKIP|planned-task|"
+            f"{task.id}: planned by rubric but not interactively executed by the deterministic runner"
+        )
+    markers.append(
+        "STEP_SKIP|primary-workflow|"
+        "deterministic runner detects workflow cues but does not complete upload/download flows; use manual evidence for full task execution"
+    )
+    markers.append(
+        "STEP_SKIP|jtbd-forces|"
+        "semantic customer-readiness cues checked, but push/pull/anxiety/habit require human/agent interpretation"
+    )
+    markers.append(
+        "STEP_SKIP|buyer-user-mismatch|"
+        "buyer/operator cues checked heuristically; budget-owner validation requires manual customer-test evidence"
+    )
+    markers.append(
+        "STEP_SKIP|emotional-confidence|"
+        "trust, recovery, output, and domain-fit cues checked heuristically; customer confidence requires manual interpretation"
+    )
+    markers.append(f"STEP_SKIP|customer-context|configured persona={profile.persona}; target={target.url}")
     return markers, findings
 
 
