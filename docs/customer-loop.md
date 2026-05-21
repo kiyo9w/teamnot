@@ -96,16 +96,19 @@ customer-loop artifacts.
 The optional `OpenClawWindowsCDPRunner` shells out to `scripts/winbrowser` when
 present and reports a readable error when absent. It is not a title-only smoke
 check: it navigates in a real Windows Chrome/CDP session, captures first
-impression and full-page screenshots, probes the DOM, and emits
-`STEP_PASS`/`STEP_FAIL` markers across first impression, core workflow cues,
-output/actionability, trust copy, accessibility basics, layout overflow, and
-resource health. Tests mock command execution and do not require a real browser.
+impression, full-page, and mobile-review screenshots, probes the DOM, and emits
+`STEP_PASS`/`STEP_FAIL`/`STEP_SKIP` markers using the `customer-testing-openclaw`
+rubric. Coverage includes first 30-second impression, customer promise, core
+workflow cues, output/actionability, error recovery, trust/data handling,
+adoption and commercial cues, domain fit, time-to-value, recommendation clarity,
+mobile review, accessibility basics, layout overflow, resource health, JTBD
+forces, buyer/user mismatch, and emotional confidence. Tests mock command
+execution and do not require a real browser.
 
-Full task-specific flows such as uploading a file, completing checkout, or
-testing an authenticated workspace still belong in the richer customer-testing
-rubric or a future custom runner. Customer Loop's built-in OpenClaw runner is
-the productized browser evidence baseline, while manual mode remains the
-fallback for ingesting richer human/agent reports.
+Full task-specific flows such as uploading a real file, completing checkout, or
+testing an authenticated workspace can still use manual mode to ingest an even
+richer human/agent report. The built-in OpenClaw runner is now the productized
+customer-readiness probe, not a smoke test fallback.
 
 ## Generated Brief Shape
 

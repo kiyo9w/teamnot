@@ -43,6 +43,33 @@ def render_customer_report(report: CustomerReport) -> str:
             _render_field("Recommendation", finding.recommendation),
             f"- Confidence: {finding.confidence:.2f}",
         ])
+    lines.extend([
+        "",
+        "## Scores",
+        f"- Job importance: {report.scores.job_importance}/10",
+        f"- Customer value: {report.scores.value}/10",
+        f"- Time-to-value: {report.scores.time_to_value}/10",
+        f"- Task success: {report.scores.task_success}/10",
+        f"- Usability: {report.scores.usability}/10",
+        f"- Trust/readiness: {report.scores.trust_readiness}/10",
+        f"- Output actionability: {report.scores.output_actionability}/10",
+        f"- Domain fit: {report.scores.domain_fit}/10",
+        f"- Buying readiness: {report.scores.buying_readiness}/10",
+        f"- Retention likelihood: {report.scores.retention_likelihood}/10",
+        f"- Emotional confidence: {report.scores.emotional_confidence}/10",
+        f"- Technical reliability: {report.scores.technical_reliability}/10",
+        "",
+        "## Evidence",
+    ])
+    if not report.evidence:
+        lines.append("No evidence captured.")
+    for item in report.evidence:
+        if item.observed_behavior:
+            lines.append(f"- {item.observed_behavior}")
+        for screenshot in item.screenshot_paths:
+            lines.append(f"  - Screenshot: {screenshot}")
+        if item.raw_excerpt:
+            lines.extend(["", "```text", item.raw_excerpt.strip(), "```"])
     return "\n".join(lines).strip() + "\n"
 
 

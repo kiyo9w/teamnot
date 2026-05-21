@@ -108,16 +108,56 @@ def default_customer_test_plan(config: CustomerLoopConfig):
     return CustomerTestPlan(
         target=config.target,
         customer_job=CustomerJob(
-            functional=f"Evaluate whether {config.target.url} solves the target workflow.",
-            emotional="Feel confident enough to trust the product for real work.",
-            social="Be comfortable recommending the workflow to the team or buyer.",
+            functional=(
+                f"Complete the product's core workflow at {config.target.url} and decide "
+                "whether it solves the customer problem without developer help."
+            ),
+            emotional="Feel safer and more confident after using the product in real work.",
+            social="Be able to justify the result to a teammate, manager, client, or buyer.",
+            importance=8,
         ),
         tasks=[
             CustomerTestTask(
-                id="task-001",
-                title="Attempt the core customer workflow",
-                instructions="Use the product as the stated customer profile and capture blockers.",
-                success_criteria=["Customer can complete the core workflow without trust blockers."],
-            )
+                id="first-impression",
+                title="Judge the first 30-second impression",
+                instructions="Decide whether the target customer can tell who this is for, what job it solves, and what to do first.",
+                success_criteria=["Purpose, audience, promise, and first action are clear without reading external docs."],
+            ),
+            CustomerTestTask(
+                id="primary-workflow",
+                title="Attempt the core workflow",
+                instructions="Use realistic customer input and record blockers, confusing moments, and before/after evidence.",
+                success_criteria=["The customer can complete the main job and reach a useful result without developer knowledge."],
+            ),
+            CustomerTestTask(
+                id="output-actionability",
+                title="Evaluate the result as a decision artifact",
+                instructions="Check whether the output is specific, prioritized, explainable, exportable, and usable by a real operator.",
+                success_criteria=["The customer can act on the output and explain it to someone else."],
+            ),
+            CustomerTestTask(
+                id="error-recovery",
+                title="Check mistake and recovery paths",
+                instructions="Look for invalid-input handling, retry guidance, preserved work, and customer-friendly failure language.",
+                success_criteria=["Mistakes produce clear next actions instead of dead ends or technical-only errors."],
+            ),
+            CustomerTestTask(
+                id="trust-adoption",
+                title="Assess trust, risk, and adoption blockers",
+                instructions="Check data handling, privacy, proof, onboarding, support, pricing/packaging, domain fit, and buyer objections.",
+                success_criteria=["A buyer or operator has enough confidence to try this with real work data."],
+            ),
+            CustomerTestTask(
+                id="mobile-accessibility-reliability",
+                title="Cover mobile review, accessibility basics, and reliability",
+                instructions="Check phone-review suitability, labels/headings/focus cues, layout overflow, load time, failed resources, and runtime breakage.",
+                success_criteria=["The product remains readable, operable, and credible outside the ideal desktop path."],
+            ),
         ],
+        notes=(
+            "Use the customer-testing-openclaw rubric: plan across persona/JTBD, functional flows, "
+            "adversarial/error cases, trust/adoption/domain fit, and coverage gaps. Emit STEP_PASS, "
+            "STEP_FAIL, or STEP_SKIP markers with evidence. Judge from the customer perspective, not from "
+            "implementation correctness."
+        ),
     )

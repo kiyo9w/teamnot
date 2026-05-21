@@ -111,13 +111,21 @@ def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):
                     '"headings": ["Mock Product"],'
                     '"buttons": ["Run test"],'
                     '"inputs": [{"tag": "input", "type": "file", "text": "", "label": "CSV file"}],'
+                    '"forms": [{"text": "Upload CSV file and run test", "controls": 2}],'
                     '"links": [],'
-                    '"bodyText": "Upload your CSV to generate a report. Privacy: data is local.",'
+                    '"primaryActionText": ["Run test", "Download report"],'
+                    '"bodyText": "For agency operators with risky CSV workflow problems. Upload your CSV to generate a prioritized report, download and share it with your team, retry invalid files, use sample demo data, see pricing, contact support, and trust that privacy data is local.",'
                     '"viewport": {"width": 1280, "height": 720},'
                     '"timingMs": 123,'
                     '"failedResources": [],'
                     '"hasHorizontalOverflow": false,'
-                    '"focusableCount": 2'
+                    '"focusableCount": 2,'
+                    '"imagesWithoutAlt": 0,'
+                    '"landmarkCount": 2,'
+                    '"semanticSignals": {'
+                    '"hasPricing": true, "hasSupport": true, "hasPrivacy": true,'
+                    '"hasSample": true, "hasErrorRecovery": true, "hasCollaboration": true'
+                    "}"
                     "}}"
                 ),
                 stderr="",
@@ -136,6 +144,7 @@ def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):
     assert report.evidence[0].kind == "browser_observation"
     assert "first-impression" in report.evidence[0].raw_excerpt
     assert report.findings == []
+    assert report.scores.trust_readiness >= 8
 
 
 def test_openclaw_runner_reports_customer_findings_from_real_browser_probe(tmp_path: Path):
@@ -158,13 +167,21 @@ def test_openclaw_runner_reports_customer_findings_from_real_browser_probe(tmp_p
                     '"headings": [],'
                     '"buttons": [],'
                     '"inputs": [{"tag": "button", "text": "", "label": "", "aria": "", "placeholder": "", "name": "", "disabled": true}],'
+                    '"forms": [],'
                     '"links": [],'
+                    '"primaryActionText": [],'
                     '"bodyText": "",'
                     '"viewport": {"width": 390, "height": 844},'
                     '"timingMs": 500,'
                     '"failedResources": ["https://example-product.test/missing.css"],'
                     '"hasHorizontalOverflow": true,'
-                    '"focusableCount": 1'
+                    '"focusableCount": 1,'
+                    '"imagesWithoutAlt": 0,'
+                    '"landmarkCount": 0,'
+                    '"semanticSignals": {'
+                    '"hasPricing": false, "hasSupport": false, "hasPrivacy": false,'
+                    '"hasSample": false, "hasErrorRecovery": false, "hasCollaboration": false'
+                    "}"
                     "}}"
                 ),
                 stderr="",
@@ -179,8 +196,9 @@ def test_openclaw_runner_reports_customer_findings_from_real_browser_probe(tmp_p
     assert "first-impression-empty" in finding_ids
     assert "missing-core-workflow" in finding_ids
     assert "unlabeled-controls" in finding_ids
+    assert "missing-error-recovery-cues" in finding_ids
     assert "STEP_FAIL|first-impression" in report.evidence[0].raw_excerpt
-    assert len(report.evidence[0].screenshot_paths) == 2
+    assert len(report.evidence[0].screenshot_paths) == 3
 
 
 def test_openclaw_runner_wraps_timeout_as_customer_loop_error(tmp_path: Path):
