@@ -1086,7 +1086,45 @@ def _build_customer_findings(
         "trust, recovery, output, and domain-fit cues checked heuristically; customer confidence requires manual interpretation"
     )
     markers.append(f"STEP_SKIP|customer-context|configured persona={profile.persona}; target={target.url}")
+    findings.extend(_build_research_gap_findings(profile, plan))
     return markers, findings
+
+
+def _build_research_gap_findings(profile: CustomerProfile, plan: CustomerTestPlan) -> list[CustomerFinding]:
+    findings: list[CustomerFinding] = []
+    if profile.trust_threshold:
+        findings.append(_browser_finding(
+            "trust-threshold-not-validated",
+            "Stated trust threshold is not proven end-to-end",
+            CustomerSeverity.low,
+            f"{profile.persona} needs proof for: {profile.trust_threshold}. This run can only check visible cues.",
+            "A team may like the product but still refuse to try it on real work until the trust proof is explicit.",
+            "Every serious evaluation where data, repositories, permissions, or buyer approval matter.",
+            "Add or test a dedicated trust path that proves the threshold with concrete docs, examples, policy, or workflow evidence.",
+            trust=True,
+        ))
+    if profile.buyer_user_split:
+        findings.append(_browser_finding(
+            "buyer-user-fit-not-validated",
+            "Buyer and daily-user concerns are not separately validated",
+            CustomerSeverity.low,
+            f"The run uses one persona, but the configured buyer/user split is: {profile.buyer_user_split}.",
+            "A product can satisfy the operator and still fail manager, security, procurement, or platform-owner approval.",
+            "Every purchase or rollout where the user is not the only decision maker.",
+            "Run a second buyer/security/manager pass and compare objections against the daily user's workflow value.",
+            trust=True,
+        ))
+    if profile.current_workflow or profile.buying_trigger or profile.alternatives:
+        findings.append(_browser_finding(
+            "switching-forces-not-validated",
+            "Switching motivation and anxiety are not deeply validated",
+            CustomerSeverity.low,
+            "The browser run can see content and interactions, but it has not modeled push, pull, anxiety, habit, and success metric like a real customer interview.",
+            "The report may identify usability issues but still miss why a customer would switch, delay, or reject adoption.",
+            "Every product evaluation where alternatives, habits, or internal rollout risk matter.",
+            "Run a JTBD pass that states the current habit, trigger, desired progress, anxiety, and proof needed to switch.",
+        ))
+    return findings
 
 
 def _contains_any(text: str, terms: Sequence[str]) -> bool:
@@ -1167,12 +1205,33 @@ def _score_customer_readiness(probe: dict, findings: list[CustomerFinding]) -> C
         time_to_value=score(8, {"slow-time-to-value", "missing-core-workflow"}),
         task_success=score(8, {"missing-core-workflow", "first-impression-empty", "missing-error-recovery-cues"}),
         usability=score(8, {"unlabeled-controls", "horizontal-overflow", "mobile-review-overflow"}),
-        trust_readiness=score(8, {"missing-trust-copy", "missing-error-recovery-cues", "resource-health"}),
+        trust_readiness=score(8, {
+            "missing-trust-copy",
+            "missing-error-recovery-cues",
+            "resource-health",
+            "trust-threshold-not-validated",
+        }),
         output_actionability=score(8, {"unclear-output-value", "weak-recommendation-clarity"}),
         domain_fit=score(8, {"weak-domain-fit", "unclear-customer-promise"}),
-        buying_readiness=score(7, {"missing-adoption-cues", "missing-trust-copy", "weak-domain-fit"}),
-        retention_likelihood=score(7, {"slow-time-to-value", "unclear-output-value", "weak-domain-fit"}),
-        emotional_confidence=score(8, {"missing-trust-copy", "missing-error-recovery-cues", "resource-health"}),
+        buying_readiness=score(7, {
+            "missing-adoption-cues",
+            "missing-trust-copy",
+            "weak-domain-fit",
+            "buyer-user-fit-not-validated",
+            "trust-threshold-not-validated",
+        }),
+        retention_likelihood=score(7, {
+            "slow-time-to-value",
+            "unclear-output-value",
+            "weak-domain-fit",
+            "switching-forces-not-validated",
+        }),
+        emotional_confidence=score(8, {
+            "missing-trust-copy",
+            "missing-error-recovery-cues",
+            "resource-health",
+            "switching-forces-not-validated",
+        }),
         technical_reliability=max(1, min(10, reliability_base - (1 if "resource-health" in ids else 0))),
     )
 

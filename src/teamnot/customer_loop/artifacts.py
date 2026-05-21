@@ -38,6 +38,9 @@ def render_customer_report(report: CustomerReport) -> str:
         "## Test Plan",
         *_render_test_plan(report.plan),
         "",
+        "## Research Lens",
+        *_render_research_lens(report),
+        "",
         "## Findings",
     ]
     if not report.findings:
@@ -168,6 +171,38 @@ def _render_test_plan(plan: CustomerTestPlan) -> list[str]:
     return lines
 
 
+def _render_research_lens(report: CustomerReport) -> list[str]:
+    profile = report.profile
+    lens = [
+        f"- Customer job being judged: {report.plan.customer_job.functional}",
+        f"- User role lens: {profile.role}",
+    ]
+    if profile.current_workflow:
+        lens.append(f"- Existing workflow to beat: {profile.current_workflow}")
+    if profile.buying_trigger:
+        lens.append(f"- Buying trigger: {profile.buying_trigger}")
+    if profile.alternatives:
+        lens.append(f"- Alternatives in the customer's head: {', '.join(profile.alternatives)}")
+    if profile.trust_threshold:
+        lens.append(f"- Trust threshold: {profile.trust_threshold}")
+    if profile.buyer_user_split:
+        lens.append(f"- Buyer/user split: {profile.buyer_user_split}")
+    lens.extend(_research_gap_lens(report))
+    return lens
+
+
+def _research_gap_lens(report: CustomerReport) -> list[str]:
+    gap_ids = {finding.id for finding in report.findings}
+    gaps = []
+    if "switching-forces-not-validated" in gap_ids:
+        gaps.append("- Research gap: switching motivation, anxiety, and current-habit resistance still need a deeper pass.")
+    if "buyer-user-fit-not-validated" in gap_ids:
+        gaps.append("- Research gap: daily-user value and buyer/security approval are not yet separated enough.")
+    if "trust-threshold-not-validated" in gap_ids:
+        gaps.append("- Research gap: the stated trust threshold is visible as a concern but not proven end-to-end.")
+    return gaps
+
+
 def _render_customer_objections(report: CustomerReport) -> list[str]:
     objections = []
     raw = _raw_evidence(report)
@@ -223,11 +258,22 @@ def _render_next_iteration(report: CustomerReport) -> list[str]:
     if not blockers:
         return ["- No customer-impact finding needs follow-up."]
     top = sorted(blockers, key=lambda finding: (
-        1 if finding.trust_blocker else 0,
+        _severity_rank(finding.severity.value),
         1 if finding.core_task_blocker else 0,
+        1 if finding.trust_blocker else 0,
         finding.confidence,
     ), reverse=True)[0]
     return [f"- Fix `{top.id}`: {top.recommendation or top.title}"]
+
+
+def _severity_rank(value: str) -> int:
+    return {
+        "critical": 4,
+        "high": 3,
+        "medium": 2,
+        "low": 1,
+        "positive": 0,
+    }.get(value, 0)
 
 
 def _render_customer_journey_notes(report: CustomerReport) -> list[str]:

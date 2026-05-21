@@ -19,12 +19,14 @@ from teamnot.customer_loop import (
 from teamnot.customer_loop.artifacts import render_customer_report
 from teamnot.customer_loop.models import (
     CustomerEvidence,
+    CustomerFinding,
     CustomerFlow,
     CustomerFlowPack,
     CustomerFlowStep,
     CustomerLoopConfig,
     CustomerReport,
     CustomerScores,
+    CustomerSeverity,
 )
 from teamnot.customer_loop.orchestrator import default_customer_test_plan
 from teamnot.customer_loop.runners import _path_for_windows_wrapper, _resolve_wrapper_path
@@ -185,6 +187,83 @@ def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):
     assert "STEP_PASS|planned-task" not in report.evidence[0].raw_excerpt
     assert report.findings == []
     assert report.scores.trust_readiness >= 8
+
+
+def test_openclaw_runner_surfaces_persona_research_gap_findings(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def command_runner(command):
+        commands.append(list(command))
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "title": "Mock"}', stderr="")
+        if action == "viewport":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+        if action == "eval":
+            if any(
+                cmd[2] == "viewport" and "--width" in cmd and cmd[cmd.index("--width") + 1] == "390"
+                for cmd in commands if len(cmd) > 2
+            ):
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout='{"ok": true, "result": {"viewport": {"width": 390, "height": 844}, "hasHorizontalOverflow": false}}',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"ok": true, "result": {'
+                    '"url": "https://example-product.test",'
+                    '"title": "Secure Dev Agent",'
+                    '"headings": ["Secure Dev Agent"],'
+                    '"buttons": ["Start demo"],'
+                    '"inputs": [],'
+                    '"forms": [],'
+                    '"links": [],'
+                    '"primaryActionText": ["Start demo"],'
+                    '"bodyText": "For security leads reviewing repository access workflow risk. Start demo to generate a report with next action, retry guidance, privacy policy, SOC2 proof, permission model, pricing, support, sample output, share with team.",'
+                    '"viewport": {"width": 1280, "height": 900},'
+                    '"timingMs": 123,'
+                    '"failedResources": [],'
+                    '"hasHorizontalOverflow": false,'
+                    '"focusableCount": 1,'
+                    '"imagesWithoutAlt": 0,'
+                    '"landmarkCount": 2,'
+                    '"semanticSignals": {'
+                    '"hasPricing": true, "hasSupport": true, "hasPrivacy": true,'
+                    '"hasSample": true, "hasErrorRecovery": true, "hasCollaboration": true'
+                    "}"
+                    "}}"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    target = ExperienceTarget(url="https://example-product.test")
+    profile = CustomerProfile(
+        persona="Security lead evaluating a coding agent",
+        role="security lead",
+        current_workflow="reviews repository access and permission risk before developer rollout",
+        buying_trigger="developer team wants to adopt an agent for production repositories",
+        alternatives=["Cursor", "Claude Code"],
+        buyer_user_split="developer is daily user; security lead approves repository access",
+        trust_threshold="SOC2 proof, permission model, and data retention policy",
+    )
+    plan = default_customer_test_plan(CustomerLoopConfig(target=target, profile=profile, out_dir=tmp_path))
+
+    report = OpenClawWindowsCDPRunner(wrapper_path=wrapper, command_runner=command_runner).run(
+        target, profile, plan, tmp_path / "out"
+    )
+
+    ids = {finding.id for finding in report.findings}
+    assert {"trust-threshold-not-validated", "buyer-user-fit-not-validated", "switching-forces-not-validated"} <= ids
+    assert report.scores.trust_readiness < 8
+    assert report.scores.buying_readiness < 7
 
 
 def test_openclaw_runner_reports_customer_findings_from_real_browser_probe(tmp_path: Path):
@@ -902,6 +981,9 @@ def test_customer_report_renders_multidimensional_research_synthesis(tmp_path: P
     rendered = render_customer_report(report)
 
     assert "## Customer Journey Notes" in rendered
+    assert "## Research Lens" in rendered
+    assert "Alternatives in the customer's head: Cursor, Claude Code" in rendered
+    assert "Trust threshold: Needs proof before real repository access" in rendered
     assert "- First impression: passed: clear product heading" in rendered
     assert "## Route-By-Route Analysis" in rendered
     assert "Create project (`/projects`): partially covered; 1 executable step(s), 1 interpretation checkpoint(s)." in rendered
@@ -916,6 +998,34 @@ def test_customer_report_renders_multidimensional_research_synthesis(tmp_path: P
     assert "Why switch from Cursor, Claude Code?" in rendered
     assert "## Next Research Actions" in rendered
     assert "Run a JTBD pass" in rendered
+
+
+def test_customer_report_next_iteration_prioritizes_severity_over_research_gap(tmp_path: Path):
+    target, profile, plan = _plan(tmp_path)
+    report = CustomerReport(
+        profile=profile,
+        target=target,
+        plan=plan,
+        findings=[
+            CustomerFinding(
+                id="trust-threshold-not-validated",
+                title="Trust threshold not validated",
+                severity=CustomerSeverity.low,
+                trust_blocker=True,
+                recommendation="Run trust proof pass.",
+            ),
+            CustomerFinding(
+                id="missing-error-recovery-cues",
+                title="Mistake recovery is not visible",
+                severity=CustomerSeverity.medium,
+                recommendation="Show retry guidance.",
+            ),
+        ],
+    )
+
+    rendered = render_customer_report(report)
+
+    assert "Fix `missing-error-recovery-cues`: Show retry guidance." in rendered
 
 
 def test_runner_enum_values_are_stable():
