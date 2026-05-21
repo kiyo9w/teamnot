@@ -201,6 +201,56 @@ def test_inspected_flow_uses_todo_for_overly_broad_result_cues(tmp_path: Path):
     assert any(step.id == "outcome-visible" and step.text == "TODO: expected result/success text" for step in flow_pack.flows[0].steps)
 
 
+def test_inspected_flow_ignores_nav_search_and_prioritizes_cta(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def command_runner(command):
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+        if action == "eval":
+            result = {
+                "mainSelector": "main",
+                "actions": [
+                    {"text": "Skip to main content", "selector": "a", "tag": "a"},
+                    {"text": "Developers menu", "selector": "button", "tag": "button"},
+                    {"text": "Download for Windows", "selector": "a", "tag": "a"},
+                    {"text": "Explore Codex for work", "selector": "a", "tag": "a"},
+                ],
+                "inputs": [{"selector": "input[type=text]", "type": "text", "label": "Search"}],
+                "resultCues": [],
+                "recoveryCues": [],
+                "trustCues": [],
+                "adoptionCues": [],
+            }
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"ok": True, "result": result}),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    flow_pack = inspect_customer_flow_pack(
+        ExperienceTarget(url="https://example-product.test"),
+        CustomerProfile(persona="Developer", role="engineer"),
+        ["/"],
+        wrapper_path=wrapper,
+        command_runner=command_runner,
+    )
+
+    core = flow_pack.flows[0]
+    assert not any(step.action == "fill" for step in core.steps)
+    assert any(
+        step.action == "click_text" and step.text in {"Download for Windows", "Explore Codex for work"}
+        for step in core.steps
+    )
+    assert all(step.text != "Developers menu" for step in core.steps if step.action == "click_text")
+    assert all(step.text != "Skip to main content" for step in core.steps if step.action == "click_text")
+
+
 def test_customer_flow_inspect_cli_reports_missing_wrapper(tmp_path: Path):
     profile_path = tmp_path / "profile.yaml"
     save_yaml(CustomerProfile(persona="B2B admin", role="workspace admin"), profile_path)

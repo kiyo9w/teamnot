@@ -206,7 +206,7 @@ def _route_name(route: str) -> str:
 
 def _flow_from_page(page: dict, profile: CustomerProfile, primary: bool) -> CustomerFlow:
     action = _best_action(page.get("actions", []))
-    input_control = _first([control for control in page.get("inputs", []) if control.get("type") != "hidden"])
+    input_control = _first([control for control in page.get("inputs", []) if _input_is_customer_workflow(control)])
     result_text = _best_cue(page.get("resultCues", [])) or "TODO: expected result/success text"
     flow_name = "Core first-value journey" if primary else f"{_route_name(page.get('route', '/'))} journey"
     steps = [
@@ -258,7 +258,7 @@ def _flow_from_page(page: dict, profile: CustomerProfile, primary: bool) -> Cust
 
 
 def _inspected_error_recovery_flow(page: dict) -> CustomerFlow:
-    input_control = _first([control for control in page.get("inputs", []) if control.get("type") != "hidden"])
+    input_control = _first([control for control in page.get("inputs", []) if _input_is_customer_workflow(control)])
     action = _best_action(page.get("actions", []))
     steps = [
         CustomerFlowStep(
@@ -355,6 +355,16 @@ def _sample_value_for_input(input_control: dict) -> str:
     return "TODO: realistic customer input"
 
 
+def _input_is_customer_workflow(input_control: dict) -> bool:
+    input_type = str(input_control.get("type", "")).lower()
+    label = " ".join(str(input_control.get(key, "")) for key in ("label", "placeholder", "name", "selector")).lower()
+    if input_type == "hidden":
+        return False
+    if "search" in label:
+        return False
+    return True
+
+
 def _best_action(actions: list[dict]) -> dict | None:
     ranked = sorted(actions, key=_action_rank, reverse=True)
     return ranked[0] if ranked else None
@@ -367,11 +377,16 @@ def _action_rank(action: dict) -> tuple[int, int, int]:
     primary_terms = (
         "run", "start", "create", "submit", "generate", "analyze", "analyse",
         "import", "preflight", "upload", "continue", "save", "send", "invite",
+        "download", "explore", "contact", "try", "claim", "install",
     )
-    nav_terms = ("how it works", "pricing", "docs", "privacy", "terms", "contact", "learn")
+    nav_terms = (
+        "skip to", "home", "menu", "research", "products", "business",
+        "developers", "company", "foundation", "how it works", "pricing",
+        "docs", "privacy", "terms", "learn",
+    )
     primary_score = 2 if any(term in text for term in primary_terms) else 0
     button_score = 1 if tag == "button" or "submit" in selector or "button" in selector else 0
-    nav_penalty = -1 if tag == "a" and any(term in text for term in nav_terms) else 0
+    nav_penalty = -2 if any(term in text for term in nav_terms) else 0
     return primary_score + nav_penalty, button_score, len(text)
 
 
@@ -435,7 +450,7 @@ _FLOW_INSPECT_JS = r"""(() => {
   };
   const controls = Array.from(document.querySelectorAll("button,[role=button],a[href],input[type=button],input[type=submit]"))
     .filter((el) => el.offsetParent !== null)
-    .slice(0, 12)
+    .slice(0, 40)
     .map((el) => ({
       text: textOf(el) || el.getAttribute("aria-label") || el.getAttribute("value") || "",
       selector: selectorFor(el),
