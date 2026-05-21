@@ -89,6 +89,7 @@ class CustomerFlowStep(BaseModel):
     selector: str = ""
     text: str = ""
     value: str = ""
+    url: str = ""
     file: Path | None = None
     timeout_ms: int = Field(default=10000, ge=100, le=60000)
     description: str = ""
@@ -96,7 +97,24 @@ class CustomerFlowStep(BaseModel):
 
 class CustomerFlow(BaseModel):
     name: str = Field(min_length=1)
-    steps: list[CustomerFlowStep] = Field(default_factory=list)
+    start_url: str = ""
+    steps: list[CustomerFlowStep] = Field(default_factory=list, min_length=1)
+
+
+class CustomerFlowPack(BaseModel):
+    name: str = "Customer flow pack"
+    reset_between_flows: bool = True
+    flows: list[CustomerFlow] = Field(default_factory=list, min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_single_flow_shape(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "steps" in data and "flows" not in data:
+            return {
+                "name": data.get("name", "Customer flow pack"),
+                "flows": [data],
+            }
+        return data
 
 
 class CustomerEvidence(BaseModel):

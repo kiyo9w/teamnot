@@ -17,7 +17,12 @@ from teamnot.customer_loop import (
     OpenClawWindowsInteractiveRunner,
 )
 from teamnot.customer_loop.artifacts import render_customer_report
-from teamnot.customer_loop.models import CustomerFlow, CustomerFlowStep, CustomerLoopConfig
+from teamnot.customer_loop.models import (
+    CustomerFlow,
+    CustomerFlowPack,
+    CustomerFlowStep,
+    CustomerLoopConfig,
+)
 from teamnot.customer_loop.orchestrator import default_customer_test_plan
 from teamnot.customer_loop.runners import _path_for_windows_wrapper, _resolve_wrapper_path
 
@@ -434,10 +439,121 @@ def test_openclaw_flow_runner_executes_configured_customer_steps(tmp_path: Path)
     )
 
     assert report.evidence[1].kind == "browser_flow"
-    assert "STEP_PASS|flow-upload-csv" in report.evidence[1].raw_excerpt
-    assert "STEP_PASS|flow-see-blockers" in report.evidence[1].raw_excerpt
+    assert "STEP_PASS|flow-upload-csv-and-render-report-upload-csv" in report.evidence[1].raw_excerpt
+    assert "STEP_PASS|flow-upload-csv-and-render-report-see-blockers" in report.evidence[1].raw_excerpt
     assert len(report.evidence[1].screenshot_paths) == 3
     assert any(cmd[1:3] == ["--action", "upload"] for cmd in commands)
+    assert report.findings == []
+
+
+def test_openclaw_flow_runner_executes_multi_screen_non_upload_flow_pack(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def command_runner(command):
+        commands.append(list(command))
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "title": "Dashboard"}', stderr="")
+        if action == "viewport":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+        if action == "eval" and "--expr" in command and "step.action" in command[-1]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"ok": true, "result": {"passed": true, "summary": "generic step passed"}}',
+                stderr="",
+            )
+        if action == "eval":
+            if any(
+                cmd[2] == "viewport" and "--width" in cmd and cmd[cmd.index("--width") + 1] == "390"
+                for cmd in commands if len(cmd) > 2
+            ):
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=(
+                        '{"ok": true, "result": {'
+                        '"url": "https://example-product.test",'
+                        '"viewport": {"width": 390, "height": 844},'
+                        '"hasHorizontalOverflow": false,'
+                        '"bodyTextLength": 300,'
+                        '"firstActions": ["New project", "Invite"]'
+                        "}}"
+                    ),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"ok": true, "result": {'
+                    '"url": "https://example-product.test",'
+                    '"title": "Mock SaaS",'
+                    '"headings": ["Projects"],'
+                    '"buttons": ["New project", "Invite"],'
+                    '"inputs": [{"tag": "input", "type": "text", "text": "", "label": "Project name"}],'
+                    '"forms": [{"text": "New project Project name", "controls": 2}],'
+                    '"links": [],'
+                    '"primaryActionText": ["New project", "Invite"],'
+                    '"bodyText": "For operators managing project workflow problems, invite teammates, settings, billing, privacy, support, demo, retry and collaboration. Create a project to get a result report, export summary, recommendations, and next action for your manager or buyer.",'
+                    '"viewport": {"width": 1280, "height": 900},'
+                    '"timingMs": 123,'
+                    '"failedResources": [],'
+                    '"hasHorizontalOverflow": false,'
+                    '"focusableCount": 3,'
+                    '"imagesWithoutAlt": 0,'
+                    '"landmarkCount": 2,'
+                    '"semanticSignals": {'
+                    '"hasPricing": true, "hasSupport": true, "hasPrivacy": true,'
+                    '"hasSample": true, "hasErrorRecovery": true, "hasCollaboration": true'
+                    "}"
+                    "}}"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    flow_pack = CustomerFlowPack(
+        name="SaaS operator journeys",
+        flows=[
+            CustomerFlow(
+                name="Create project",
+                start_url="/projects",
+                steps=[
+                    CustomerFlowStep(id="open-new-project", action="click_text", text="New project"),
+                    CustomerFlowStep(id="name-project", action="fill", selector="#project-name", value="Q2 Migration"),
+                    CustomerFlowStep(id="save-project", action="click_text", text="Create"),
+                    CustomerFlowStep(id="project-created", action="wait_for_url", url="/projects/"),
+                ],
+            ),
+            CustomerFlow(
+                name="Invite teammate",
+                start_url="/settings/team",
+                steps=[
+                    CustomerFlowStep(id="fill-email", action="fill", selector="input[type=email]", value="ops@example.com"),
+                    CustomerFlowStep(id="select-role", action="select", selector="#role", value="viewer"),
+                    CustomerFlowStep(id="send-invite", action="click_text", text="Invite"),
+                    CustomerFlowStep(id="invite-confirmed", action="assert_text", text="Invitation sent"),
+                ],
+            ),
+        ],
+    )
+    target, profile, plan = _plan(tmp_path)
+    report = OpenClawWindowsFlowRunner(flow_pack, wrapper_path=wrapper, command_runner=command_runner).run(
+        target, profile, plan, tmp_path / "out"
+    )
+
+    assert report.evidence[1].kind == "browser_flow"
+    assert "SaaS operator journeys" in report.evidence[1].observed_behavior
+    assert "STEP_PASS|flow-create-project-open-new-project" in report.evidence[1].raw_excerpt
+    assert "STEP_PASS|flow-invite-teammate-invite-confirmed" in report.evidence[1].raw_excerpt
+    assert len(report.evidence[1].screenshot_paths) == 8
+    navigated_urls = [cmd[cmd.index("--url") + 1] for cmd in commands if "--url" in cmd]
+    assert "https://example-product.test/projects" in navigated_urls
+    assert "https://example-product.test/settings/team" in navigated_urls
     assert report.findings == []
 
 

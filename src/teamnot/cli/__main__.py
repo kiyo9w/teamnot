@@ -448,9 +448,9 @@ def _customer_loop_runner(runner: CustomerLoopRunnerName, evidence_path: Path | 
     if runner == CustomerLoopRunnerName.openclaw_windows_flow:
         if flow_path is None:
             raise CustomerLoopRunnerError("--flow is required for openclaw-windows-flow mode")
-        from teamnot.customer_loop.models import CustomerFlow
+        from teamnot.customer_loop.models import CustomerFlowPack
 
-        return OpenClawWindowsFlowRunner(load_model(flow_path, CustomerFlow))
+        return OpenClawWindowsFlowRunner(load_model(flow_path, CustomerFlowPack))
     if runner == CustomerLoopRunnerName.openclaw_windows_interactive:
         return OpenClawWindowsInteractiveRunner()
     return OpenClawWindowsCDPRunner()

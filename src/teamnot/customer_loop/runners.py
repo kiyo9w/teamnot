@@ -8,11 +8,13 @@ import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urljoin
 
 from teamnot.customer_loop.models import (
     CustomerEvidence,
     CustomerFinding,
     CustomerFlow,
+    CustomerFlowPack,
     CustomerFlowStep,
     CustomerLoopRunnerError,
     CustomerProfile,
@@ -246,12 +248,12 @@ class OpenClawWindowsFlowRunner(OpenClawWindowsInteractiveRunner):
 
     def __init__(
         self,
-        flow: CustomerFlow,
+        flow_pack: CustomerFlow | CustomerFlowPack,
         wrapper_path: str | Path = "scripts/winbrowser",
         command_runner: CommandRunner | None = None,
     ):
         super().__init__(wrapper_path=wrapper_path, command_runner=command_runner)
-        self.flow = flow
+        self.flow_pack = _normalize_flow_pack(flow_pack)
 
     def run(
         self,
@@ -270,41 +272,56 @@ class OpenClawWindowsFlowRunner(OpenClawWindowsInteractiveRunner):
         self._try_run(["--action", "viewport", "--width", "1280", "--height", "900"])
         markers: list[str] = []
         findings: list[CustomerFinding] = []
-        step_results: list[dict] = []
+        flow_results: list[dict] = []
         screenshot_paths: list[str] = []
-        for index, step in enumerate(self.flow.steps, start=1):
-            result = self._run_flow_step(step)
-            step_results.append(result)
-            shot = screenshots / f"flow-{index:02d}-{_slug(step.id)}.png"
-            self._screenshot(shot)
-            screenshot_paths.append(str(shot))
-            if result.get("passed"):
-                markers.append(f"STEP_PASS|flow-{step.id}|{result.get('summary', step.action)}")
-                continue
-            markers.append(f"STEP_FAIL|flow-{step.id}|{result.get('summary', step.action)}")
-            findings.append(_browser_finding(
-                f"flow-{_slug(step.id)}-failed",
-                f"Configured customer flow step failed: {step.id}",
-                CustomerSeverity.high,
-                "The customer cannot complete the configured real workflow step.",
-                "The product may look ready in a demo path but still fail in the actual customer workflow.",
-                "Every customer attempting this configured workflow.",
-                f"Fix the product or flow target so step `{step.id}` can complete.",
-                core=True,
-            ))
-            break
+        for flow_index, flow in enumerate(self.flow_pack.flows, start=1):
+            flow_slug = _slug(flow.name)
+            if self.flow_pack.reset_between_flows or flow.start_url:
+                start_url = _flow_url(target, flow.start_url)
+                navigate = _parse_json_stdout(self._run(["--action", "navigate", "--url", start_url]))
+                flow_results.append({
+                    "flow": flow.name,
+                    "event": "navigate",
+                    "url": start_url,
+                    "result": navigate,
+                })
+            markers.append(f"STEP_PASS|flow-{flow_slug}-start|started customer flow: {flow.name}")
+            for step_index, step in enumerate(flow.steps, start=1):
+                result = self._run_flow_step(step, target)
+                flow_results.append({"flow": flow.name, **result})
+                shot = screenshots / f"flow-{flow_index:02d}-{step_index:02d}-{flow_slug}-{_slug(step.id)}.png"
+                self._screenshot(shot)
+                screenshot_paths.append(str(shot))
+                marker_id = f"flow-{flow_slug}-{step.id}"
+                if result.get("passed"):
+                    markers.append(f"STEP_PASS|{marker_id}|{result.get('summary', step.action)}")
+                    continue
+                markers.append(f"STEP_FAIL|{marker_id}|{result.get('summary', step.action)}")
+                findings.append(_browser_finding(
+                    f"flow-{flow_slug}-{_slug(step.id)}-failed",
+                    f"Configured customer flow step failed: {flow.name} / {step.id}",
+                    CustomerSeverity.high,
+                    "The customer cannot complete the configured real workflow step.",
+                    "The product may look ready in a demo path but still fail in the actual customer workflow.",
+                    "Every customer attempting this configured workflow.",
+                    f"Fix the product or flow target so `{flow.name}` step `{step.id}` can complete.",
+                    core=True,
+                ))
+                break
+            if findings:
+                break
         evidence = CustomerEvidence(
             kind="browser_flow",
             path=screenshot_paths[0] if screenshot_paths else "",
             screenshot_paths=screenshot_paths,
-            observed_behavior=_summarize_flow(self.flow, markers),
+            observed_behavior=_summarize_flow_pack(self.flow_pack, markers),
             raw_excerpt="\n".join(markers),
             metadata={
                 "runner": "openclaw-windows-flow",
                 "rubric": "customer-testing-openclaw",
-                "method": "configured browser flow with per-step screenshots",
-                "flow": self.flow.model_dump(mode="json"),
-                "steps": step_results,
+                "method": "configured browser flow pack with per-step screenshots",
+                "flow_pack": self.flow_pack.model_dump(mode="json"),
+                "flows": flow_results,
             },
         )
         report.evidence.append(evidence)
@@ -321,7 +338,17 @@ class OpenClawWindowsFlowRunner(OpenClawWindowsInteractiveRunner):
         )
         return report
 
-    def _run_flow_step(self, step: CustomerFlowStep) -> dict:
+    def _run_flow_step(self, step: CustomerFlowStep, target: ExperienceTarget) -> dict:
+        if step.action == "navigate":
+            target_url = _flow_url(target, step.url or step.value or step.text)
+            navigated = _parse_json_stdout(self._run(["--action", "navigate", "--url", target_url]))
+            return {
+                "id": step.id,
+                "action": step.action,
+                "passed": True,
+                "summary": f"navigated to {target_url}",
+                "result": navigated,
+            }
         if step.action == "upload":
             if step.file is None:
                 raise CustomerLoopRunnerError(f"Flow step {step.id} upload requires file")
@@ -400,6 +427,19 @@ def _slug(value: str) -> str:
     return cleaned or "step"
 
 
+def _normalize_flow_pack(flow_pack: CustomerFlow | CustomerFlowPack) -> CustomerFlowPack:
+    if isinstance(flow_pack, CustomerFlowPack):
+        return flow_pack
+    return CustomerFlowPack(name=flow_pack.name, flows=[flow_pack])
+
+
+def _flow_url(target: ExperienceTarget, url_or_path: str) -> str:
+    value = url_or_path.strip()
+    if not value:
+        return str(target.url)
+    return urljoin(str(target.url), value)
+
+
 def _flow_step_expr(step: CustomerFlowStep) -> str:
     payload = json.dumps({
         "id": step.id,
@@ -407,12 +447,19 @@ def _flow_step_expr(step: CustomerFlowStep) -> str:
         "selector": step.selector,
         "text": step.text,
         "value": step.value,
+        "url": step.url,
         "timeoutMs": step.timeout_ms,
     })
     return f"""(async () => {{
       const step = {payload};
       const textOf = (el) => (el?.innerText || el?.textContent || "").replace(/\\s+/g, " ").trim();
       const find = (selector) => selector ? document.querySelector(selector) : null;
+      const visible = (el) => Boolean(el && el.offsetParent !== null);
+      const allControls = () => Array.from(document.querySelectorAll("button,[role=button],a[href],input[type=button],input[type=submit]"));
+      const byText = (text) => {{
+        const needle = String(text || "").toLowerCase();
+        return allControls().find((el) => visible(el) && textOf(el).toLowerCase().includes(needle));
+      }};
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const waitFor = async (predicate) => {{
         const start = Date.now();
@@ -432,11 +479,43 @@ def _flow_step_expr(step: CustomerFlowStep) -> str:
         el.dispatchEvent(new Event("change", {{ bubbles: true }}));
         return {{ passed: true, summary: `filled ${{step.selector}}` }};
       }}
+      if (step.action === "select") {{
+        const el = find(step.selector);
+        if (!el) return {{ passed: false, summary: `selector not found: ${{step.selector}}` }};
+        el.value = step.value;
+        el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+        el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+        return {{ passed: true, summary: `selected ${{step.value}} in ${{step.selector}}` }};
+      }}
+      if (step.action === "check" || step.action === "uncheck") {{
+        const el = find(step.selector);
+        if (!el) return {{ passed: false, summary: `selector not found: ${{step.selector}}` }};
+        el.checked = step.action === "check";
+        el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+        el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+        return {{ passed: true, summary: `${{step.action}}ed ${{step.selector}}` }};
+      }}
       if (step.action === "click") {{
         const el = find(step.selector);
         if (!el) return {{ passed: false, summary: `selector not found: ${{step.selector}}` }};
         el.click();
         return {{ passed: true, summary: `clicked ${{textOf(el) || step.selector}}` }};
+      }}
+      if (step.action === "click_text") {{
+        const el = byText(step.text || step.value);
+        if (!el) return {{ passed: false, summary: `visible action not found by text: ${{step.text || step.value}}` }};
+        el.click();
+        return {{ passed: true, summary: `clicked text: ${{textOf(el)}}` }};
+      }}
+      if (step.action === "press") {{
+        const el = find(step.selector) || document.activeElement || document.body;
+        el.dispatchEvent(new KeyboardEvent("keydown", {{ key: step.value, bubbles: true }}));
+        el.dispatchEvent(new KeyboardEvent("keyup", {{ key: step.value, bubbles: true }}));
+        return {{ passed: true, summary: `pressed ${{step.value}}` }};
+      }}
+      if (step.action === "wait_ms") {{
+        await wait(Number(step.value || step.timeoutMs || 1000));
+        return {{ passed: true, summary: `waited ${{step.value || step.timeoutMs}}ms` }};
       }}
       if (step.action === "wait_for_text") {{
         const found = await waitFor(() => document.body && textOf(document.body).includes(step.text));
@@ -444,11 +523,26 @@ def _flow_step_expr(step: CustomerFlowStep) -> str:
           ? {{ passed: true, summary: `found text: ${{step.text}}` }}
           : {{ passed: false, summary: `expected text not found: ${{step.text}}` }};
       }}
+      if (step.action === "wait_for_text_absent") {{
+        const gone = await waitFor(() => document.body && !textOf(document.body).includes(step.text));
+        return gone
+          ? {{ passed: true, summary: `text absent: ${{step.text}}` }}
+          : {{ passed: false, summary: `text remained visible: ${{step.text}}` }};
+      }}
       if (step.action === "wait_for_selector") {{
         const found = await waitFor(() => find(step.selector));
         return found
           ? {{ passed: true, summary: `found selector: ${{step.selector}}` }}
           : {{ passed: false, summary: `selector not found before timeout: ${{step.selector}}` }};
+      }}
+      if (step.action === "wait_for_selector_hidden") {{
+        const hidden = await waitFor(() => {{
+          const el = find(step.selector);
+          return !el || !visible(el);
+        }});
+        return hidden
+          ? {{ passed: true, summary: `selector hidden: ${{step.selector}}` }}
+          : {{ passed: false, summary: `selector remained visible: ${{step.selector}}` }};
       }}
       if (step.action === "wait_for_enabled") {{
         const found = await waitFor(() => {{
@@ -458,6 +552,32 @@ def _flow_step_expr(step: CustomerFlowStep) -> str:
         return found
           ? {{ passed: true, summary: `enabled selector: ${{step.selector}}` }}
           : {{ passed: false, summary: `selector was not enabled: ${{step.selector}}` }};
+      }}
+      if (step.action === "wait_for_url") {{
+        const found = await waitFor(() => location.href.includes(step.url || step.value || step.text));
+        return found
+          ? {{ passed: true, summary: `url matched: ${{location.href}}` }}
+          : {{ passed: false, summary: `url did not match: ${{step.url || step.value || step.text}}` }};
+      }}
+      if (step.action === "assert_text") {{
+        const found = document.body && textOf(document.body).includes(step.text);
+        return found
+          ? {{ passed: true, summary: `asserted text: ${{step.text}}` }}
+          : {{ passed: false, summary: `missing expected text: ${{step.text}}` }};
+      }}
+      if (step.action === "assert_no_text") {{
+        const found = document.body && textOf(document.body).includes(step.text);
+        return !found
+          ? {{ passed: true, summary: `asserted text absent: ${{step.text}}` }}
+          : {{ passed: false, summary: `unexpected text present: ${{step.text}}` }};
+      }}
+      if (step.action === "assert_selector") {{
+        return find(step.selector)
+          ? {{ passed: true, summary: `asserted selector: ${{step.selector}}` }}
+          : {{ passed: false, summary: `missing selector: ${{step.selector}}` }};
+      }}
+      if (step.action === "checkpoint") {{
+        return {{ passed: true, summary: step.description || step.id }};
       }}
       return {{ passed: false, summary: `unsupported action: ${{step.action}}` }};
     }})()"""
@@ -1085,12 +1205,12 @@ def _summarize_interaction(interaction: dict, markers: list[str]) -> str:
     )
 
 
-def _summarize_flow(flow: CustomerFlow, markers: list[str]) -> str:
+def _summarize_flow_pack(flow_pack: CustomerFlowPack, markers: list[str]) -> str:
     failed = len([marker for marker in markers if marker.startswith("STEP_FAIL|")])
     passed = len([marker for marker in markers if marker.startswith("STEP_PASS|")])
     skipped = len([marker for marker in markers if marker.startswith("STEP_SKIP|")])
     return (
-        f"Configured customer flow `{flow.name}` executed. "
+        f"Configured customer flow pack `{flow_pack.name}` executed across {len(flow_pack.flows)} flow(s). "
         f"Markers: {passed} pass, {failed} fail, {skipped} skip."
     )
 

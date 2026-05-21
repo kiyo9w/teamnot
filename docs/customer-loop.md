@@ -105,26 +105,34 @@ mobile review, accessibility basics, layout overflow, resource health, JTBD
 forces, buyer/user mismatch, and emotional confidence. Tests mock command
 execution and do not require a real browser.
 
-Full task-specific flows such as uploading a real file, completing checkout, or
-testing an authenticated workspace can still use manual mode to ingest an even
-richer human/agent report. The built-in OpenClaw runner is now the productized
-customer-readiness probe, not a smoke test fallback.
+Full task-specific flows such as uploading a real file, completing checkout,
+onboarding, inviting teammates, changing settings, or testing an authenticated
+workspace can run through configured flow packs. Manual mode remains useful for
+ingesting richer human/agent reports that include business interpretation
+outside the browser.
 
 `OpenClawWindowsInteractiveRunner` is the opt-in browser interaction lane. It
 runs the baseline probe, then looks for a visible sample/demo action, clicks it,
 captures before/after screenshots, and checks whether the click creates visible
-result or download cues. It is still generic: task-specific flows such as
-uploading an arbitrary file, checkout, or authenticated setup should be modeled
-as future configured runners or ingested through manual evidence.
+result or download cues. It is a quick generic probe; project-specific work
+belongs in `OpenClawWindowsFlowRunner` flow packs.
 
 `OpenClawWindowsFlowRunner` is the task-specific lane. Pass
 `--runner openclaw-windows-flow --flow path/to/customer_flow.yaml` to execute a
-configured customer workflow after the baseline probe. Supported flow actions
-include `upload`, `fill`, `click`, `wait_for_text`, `wait_for_selector`, and
-`wait_for_enabled`. Each step emits a stable `STEP_PASS` or `STEP_FAIL` marker
-and captures a screenshot, so flows such as upload CSV → run preflight → wait for
-blockers/report → download-enabled can be verified as real customer behavior
-rather than inferred from code.
+configured customer workflow pack after the baseline probe. The YAML is product
+data, not Shopify/CSV code: one project can define a landing-page trial flow,
+another can define checkout, onboarding, workspace setup, authenticated admin
+tasks, or a 20-screen SaaS operator journey.
+
+Supported flow actions include `navigate`, `fill`, `select`, `check`,
+`uncheck`, `click`, `click_text`, `press`, `wait_ms`, `wait_for_text`,
+`wait_for_text_absent`, `wait_for_selector`, `wait_for_selector_hidden`,
+`wait_for_enabled`, `wait_for_url`, `assert_text`, `assert_no_text`,
+`assert_selector`, `checkpoint`, and `upload`. Each step emits a stable
+`STEP_PASS` or `STEP_FAIL` marker and captures a screenshot. A single file can
+contain multiple flows, so TeamNoT can test happy paths, error/recovery paths,
+navigation across screens, collaboration/sharing, checkout, settings, export, or
+any other end-user job the project defines.
 
 ## Generated Brief Shape
 

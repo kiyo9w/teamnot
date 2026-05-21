@@ -15,7 +15,7 @@ from teamnot.customer_loop.brief_generation import generate_followup_brief
 from teamnot.customer_loop.io import load_model
 from teamnot.customer_loop.models import (
     CustomerFinding,
-    CustomerFlow,
+    CustomerFlowPack,
     CustomerLoopConfig,
     CustomerLoopResult,
     CustomerLoopRunnerError,
@@ -109,7 +109,7 @@ class CustomerLoopOrchestrator:
         if config.runner == CustomerLoopRunnerName.openclaw_windows_flow:
             if config.flow_path is None:
                 raise CustomerLoopRunnerError("--flow is required for openclaw-windows-flow mode")
-            return OpenClawWindowsFlowRunner(load_model(config.flow_path, CustomerFlow))
+            return OpenClawWindowsFlowRunner(load_model(config.flow_path, CustomerFlowPack))
         if config.runner == CustomerLoopRunnerName.openclaw_windows_interactive:
             return OpenClawWindowsInteractiveRunner()
         return OpenClawWindowsCDPRunner()
