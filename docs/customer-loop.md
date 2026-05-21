@@ -87,6 +87,23 @@ expected text. It is intentionally project-agnostic: agents can fill in exact
 selectors/actions after inspecting the product, then run it through
 `--runner openclaw-windows-flow`.
 
+Inspect a running product and generate a richer starter from real DOM controls:
+
+```bash
+teamnot customer-flow-inspect \
+  --target https://example-product.test \
+  --profile .teamnot/customer-loop/customer.yaml \
+  --route / \
+  --route /app/projects \
+  --out .teamnot/customer-loop/customer_flow.yaml
+```
+
+This optional OpenClaw adapter uses `scripts/winbrowser` to navigate each route,
+read visible buttons, links, forms, labels, and customer-facing trust/recovery
+copy, then writes a flow pack with concrete selectors and action text where the
+browser can infer them. It still leaves TODOs where only product intent can
+decide the right customer input or success criterion.
+
 ## Artifacts
 
 Customer Loop writes project-local artifacts under the requested `--out`

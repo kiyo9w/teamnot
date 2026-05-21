@@ -8,7 +8,10 @@ from teamnot.customer_loop.artifacts import (
     write_report_artifacts,
 )
 from teamnot.customer_loop.brief_generation import generate_followup_brief
-from teamnot.customer_loop.flow_planning import suggest_customer_flow_pack
+from teamnot.customer_loop.flow_planning import (
+    inspect_customer_flow_pack,
+    suggest_customer_flow_pack,
+)
 from teamnot.customer_loop.io import load_model, load_yaml, save_json, save_yaml
 from teamnot.customer_loop.models import (
     CustomerEvidence,
@@ -75,6 +78,7 @@ __all__ = [
     "default_customer_test_plan",
     "ensure_artifact_dirs",
     "generate_followup_brief",
+    "inspect_customer_flow_pack",
     "load_model",
     "load_yaml",
     "render_customer_report",

@@ -59,6 +59,7 @@ from teamnot.customer_loop import (
     OpenClawWindowsFlowRunner,
     OpenClawWindowsInteractiveRunner,
     default_customer_test_plan,
+    inspect_customer_flow_pack,
     load_model,
     save_yaml,
     suggest_customer_flow_pack,
@@ -408,6 +409,40 @@ def customer_flow_plan(
         console.print(f"[red]Customer flow plan failed:[/red] {e}")
         sys.exit(1)
     console.print(f"[green]Customer flow plan written:[/green] {out_path}")
+
+
+@main.command("customer-flow-inspect", help="Inspect browser DOM and generate a customer flow pack YAML.")
+@click.option("--target", required=True, help="Target product URL.")
+@click.option("--profile", "profile_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              required=True, help="Customer profile YAML.")
+@click.option("--route", "routes", multiple=True,
+              help="Product route/screen to inspect, such as /, /signup, /app/projects.")
+@click.option("--out", "out_path", type=click.Path(dir_okay=False, path_type=Path),
+              required=True, help="Output customer flow YAML path.")
+@click.option("--wrapper", "wrapper_path", type=click.Path(dir_okay=False, path_type=Path),
+              default=Path("scripts/winbrowser"), show_default=True,
+              help="Browser wrapper command for OpenClaw Windows CDP.")
+def customer_flow_inspect(
+    target: str,
+    profile_path: Path,
+    routes: tuple[str, ...],
+    out_path: Path,
+    wrapper_path: Path,
+) -> None:
+    try:
+        profile = load_model(profile_path, CustomerProfile)
+        flow_pack = inspect_customer_flow_pack(
+            ExperienceTarget(url=target),
+            profile,
+            list(routes),
+            wrapper_path=wrapper_path,
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        save_yaml(flow_pack, out_path)
+    except (CustomerLoopError, FileNotFoundError, RuntimeError) as e:
+        console.print(f"[red]Customer flow inspect failed:[/red] {e}")
+        sys.exit(1)
+    console.print(f"[green]Customer flow inspect written:[/green] {out_path}")
 
 
 @main.command("customer-loop", help="Generate a customer-centered report and next TeamNoT brief.")
