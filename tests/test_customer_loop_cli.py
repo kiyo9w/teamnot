@@ -4,7 +4,14 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
+import teamnot.cli.__main__ as cli
 from teamnot.cli.__main__ import main
+from teamnot.customer_loop.models import (
+    CustomerFlow,
+    CustomerFlowPack,
+    CustomerFlowStep,
+    CustomerReport,
+)
 
 
 def test_customer_loop_commands_are_visible_in_help():
@@ -65,6 +72,49 @@ def test_customer_flow_session_help_exposes_required_options():
     assert result.exit_code == 0
     for option in ["--target", "--profile", "--route", "--out", "--wrapper"]:
         assert option in result.output
+
+
+def test_customer_flow_session_passes_custom_wrapper_to_runner(tmp_path: Path, monkeypatch):
+    profile = tmp_path / "profile.yaml"
+    profile.write_text("persona: Developer\nrole: engineer\n", encoding="utf-8")
+    out = tmp_path / "session"
+    wrapper = tmp_path / "custom-winbrowser"
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    captured: dict[str, Path] = {}
+    flow_pack = CustomerFlowPack(
+        name="Inspected",
+        flows=[CustomerFlow(name="Core", steps=[CustomerFlowStep(id="loaded", action="assert_selector", selector="main")])],
+    )
+
+    monkeypatch.setattr(cli, "inspect_customer_flow_pack", lambda *args, **kwargs: flow_pack)
+    monkeypatch.setattr(cli, "write_report_artifacts", lambda *args, **kwargs: None)
+
+    class FakeFlowRunner:
+        def __init__(self, flow_pack, wrapper_path):
+            captured["wrapper_path"] = wrapper_path
+
+        def run(self, target, profile_model, plan, out_dir):
+            return CustomerReport(profile=profile_model, target=target, plan=plan, summary="ok")
+
+    monkeypatch.setattr(cli, "OpenClawWindowsFlowRunner", FakeFlowRunner)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "customer-flow-session",
+            "--target",
+            "https://example-product.test",
+            "--profile",
+            str(profile),
+            "--out",
+            str(out),
+            "--wrapper",
+            str(wrapper),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["wrapper_path"] == wrapper
 
 
 def test_customer_loop_manual_mode_writes_artifacts(tmp_path: Path):

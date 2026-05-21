@@ -80,7 +80,7 @@ def render_flow_refinement_report(
     report: CustomerReport | None = None,
 ) -> str:
     inspected_gaps = flow_pack_gaps(inspected)
-    runnable_gaps = flow_pack_gaps(runnable)
+    runnable_gaps = _runnable_only_gaps(runnable)
     report_gaps = _report_gaps(report) if report else []
     remaining_gaps = _dedupe([*inspected_gaps, *runnable_gaps, *report_gaps])
     gap_lines = [f"- {gap}" for gap in remaining_gaps] if remaining_gaps else ["- None detected."]
@@ -121,6 +121,18 @@ def flow_pack_gaps(flow_pack: CustomerFlowPack) -> list[str]:
                 gaps.append(f"{flow.name} / {step.id}: unresolved TODO remains.")
             if step.action == "checkpoint":
                 gaps.append(f"{flow.name} / {step.id}: checkpoint requires human/agent interpretation.")
+    return gaps
+
+
+def _runnable_only_gaps(flow_pack: CustomerFlowPack) -> list[str]:
+    gaps: list[str] = []
+    for flow in flow_pack.flows:
+        for step in flow.steps:
+            if step.action != "checkpoint":
+                continue
+            if step.description.startswith("Skipped unresolved generated step"):
+                continue
+            gaps.append(f"{flow.name} / {step.id}: checkpoint requires human/agent interpretation.")
     return gaps
 
 
@@ -546,7 +558,12 @@ def _action_rank(action: dict) -> tuple[int, int, int]:
     primary_score = 2 if any(term in text for term in primary_terms) else 0
     button_score = 1 if tag == "button" or "submit" in selector or "button" in selector else 0
     nav_penalty = -2 if any(term in text for term in nav_terms) else 0
-    return primary_score + nav_penalty, button_score, len(text)
+    page_region_score = 3 if action.get("inMain") else 0
+    if action.get("inFooter"):
+        page_region_score -= 4
+    if action.get("inHeader") or action.get("inNav"):
+        page_region_score -= 2
+    return primary_score + nav_penalty + page_region_score, button_score, len(text)
 
 
 def _first(items) -> dict | str | None:
@@ -610,12 +627,20 @@ _FLOW_INSPECT_JS = r"""(() => {
   const controls = Array.from(document.querySelectorAll("button,[role=button],a[href],input[type=button],input[type=submit]"))
     .filter((el) => el.offsetParent !== null)
     .slice(0, 40)
-    .map((el) => ({
-      text: textOf(el) || el.getAttribute("aria-label") || el.getAttribute("value") || "",
-      selector: selectorFor(el),
-      tag: el.tagName.toLowerCase(),
-      href: el.href || "",
-    }))
+    .map((el) => {
+      const rect = el.getBoundingClientRect();
+      return {
+        text: textOf(el) || el.getAttribute("aria-label") || el.getAttribute("value") || "",
+        selector: selectorFor(el),
+        tag: el.tagName.toLowerCase(),
+        href: el.href || "",
+        inMain: Boolean(el.closest("main,[role=main]")),
+        inHeader: Boolean(el.closest("header,[role=banner]")),
+        inNav: Boolean(el.closest("nav,[role=navigation]")),
+        inFooter: Boolean(el.closest("footer,[role=contentinfo]")),
+        top: Math.round(rect.top),
+      };
+    })
     .filter((item) => item.text || item.selector);
   const inputs = Array.from(document.querySelectorAll("input,textarea,select"))
     .filter((el) => el.offsetParent !== null || el.getAttribute("type") === "file")

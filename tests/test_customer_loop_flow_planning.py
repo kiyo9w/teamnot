@@ -255,6 +255,49 @@ def test_inspected_flow_ignores_nav_search_and_prioritizes_cta(tmp_path: Path):
     assert all(step.text != "Skip to main content" for step in core.steps if step.action == "click_text")
 
 
+def test_inspected_flow_prioritizes_main_product_cta_over_footer_links(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def command_runner(command):
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+        if action == "eval":
+            result = {
+                "mainSelector": "main",
+                "actions": [
+                    {"text": "Explore ChatGPT", "selector": "a", "tag": "a", "inFooter": True},
+                    {"text": "Explore Codex for work", "selector": "a", "tag": "a", "inMain": True},
+                ],
+                "inputs": [],
+                "resultCues": [],
+                "recoveryCues": [],
+                "trustCues": [],
+                "adoptionCues": [],
+            }
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"ok": True, "result": result}),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    flow_pack = inspect_customer_flow_pack(
+        ExperienceTarget(url="https://example-product.test"),
+        CustomerProfile(persona="Developer", role="engineer"),
+        ["/"],
+        wrapper_path=wrapper,
+        command_runner=command_runner,
+    )
+
+    core = flow_pack.flows[0]
+    assert any(step.action == "click_text" and step.text == "Explore Codex for work" for step in core.steps)
+    assert all(step.text != "Explore ChatGPT" for step in core.steps if step.action == "click_text")
+
+
 def test_make_flow_pack_runnable_converts_todos_to_checkpoints():
     inspected = CustomerFlowPack(
         name="Product inspected flow pack",
@@ -277,6 +320,8 @@ def test_make_flow_pack_runnable_converts_todos_to_checkpoints():
     assert flow_pack_gaps(inspected) == ["Core / outcome: unresolved TODO remains."]
     refinement = render_flow_refinement_report(inspected, runnable)
     assert "wait_for_text` -> `checkpoint" in refinement
+    assert "Core / outcome: unresolved TODO remains." in refinement
+    assert "Core / outcome: checkpoint requires human/agent interpretation." not in refinement
     assert "External And Irreversible Action Policy" in refinement
 
 

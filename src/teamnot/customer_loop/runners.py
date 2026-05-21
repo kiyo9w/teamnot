@@ -353,11 +353,19 @@ class OpenClawWindowsFlowRunner(OpenClawWindowsInteractiveRunner):
         if step.action == "upload":
             if step.file is None:
                 raise CustomerLoopRunnerError(f"Flow step {step.id} upload requires file")
-            uploaded = _parse_json_stdout(self._run([
-                "--action", "upload",
-                "--selector", step.selector,
-                "--file", _path_for_windows_wrapper(step.file),
-            ]))
+            try:
+                uploaded = _parse_json_stdout(self._run([
+                    "--action", "upload",
+                    "--selector", step.selector,
+                    "--file", _path_for_windows_wrapper(step.file),
+                ]))
+            except CustomerLoopRunnerError as exc:
+                raise CustomerLoopRunnerError(
+                    f"Flow step {step.id} requires browser wrapper upload support (`--action upload`). "
+                    "Update the OpenClaw Windows browser wrapper or replace this generated step with "
+                    "manual evidence before claiming full workflow coverage. "
+                    f"Original error: {exc}"
+                ) from exc
             return {
                 "id": step.id,
                 "action": step.action,
@@ -684,11 +692,41 @@ _CUSTOMER_PROBE_JS = r"""(() => {
 
 _MOBILE_PROBE_JS = r"""(() => {
   const textOf = (el) => (el?.innerText || el?.textContent || "").replace(/\s+/g, " ").trim();
-  const overflow = document.documentElement.scrollWidth > innerWidth + 2;
+  const viewportWidth = innerWidth;
+  const documentWidth = Math.max(
+    document.documentElement.scrollWidth || 0,
+    document.body ? document.body.scrollWidth || 0 : 0
+  );
+  const offenderSelector = (el) => {
+    if (!el) return "";
+    if (el.id) return `${el.tagName.toLowerCase()}#${el.id}`;
+    const testId = el.getAttribute("data-testid") || el.getAttribute("data-test");
+    if (testId) return `${el.tagName.toLowerCase()}[data-testid="${testId}"]`;
+    const cls = String(el.className || "").trim().split(/\s+/).filter(Boolean).slice(0, 2).join(".");
+    return cls ? `${el.tagName.toLowerCase()}.${cls}` : el.tagName.toLowerCase();
+  };
+  const overflowOffenders = Array.from(document.querySelectorAll("body *"))
+    .map((el) => {
+      const rect = el.getBoundingClientRect();
+      return {
+        selector: offenderSelector(el),
+        tag: el.tagName.toLowerCase(),
+        text: textOf(el).slice(0, 80),
+        left: Math.round(rect.left),
+        right: Math.round(rect.right),
+        width: Math.round(rect.width),
+      };
+    })
+    .filter((item) => item.width > viewportWidth + 2 || item.left < -2 || item.right > viewportWidth + 2)
+    .sort((a, b) => b.width - a.width)
+    .slice(0, 8);
+  const overflow = documentWidth > viewportWidth + 2 || overflowOffenders.length > 0;
   return {
     url: location.href,
     viewport: { width: innerWidth, height: innerHeight },
     hasHorizontalOverflow: overflow,
+    overflowWidth: documentWidth,
+    overflowOffenders,
     bodyTextLength: textOf(document.body).length,
     firstActions: Array.from(document.querySelectorAll("button,[role=button],input[type=submit],a[href]"))
       .slice(0, 8)
@@ -984,7 +1022,8 @@ def _build_customer_findings(
             "Use a browser wrapper that supports viewport resizing before claiming mobile coverage.",
         ))
     elif mobile_probe.get("hasHorizontalOverflow"):
-        markers.append("STEP_FAIL|mobile-review|mobile/narrow viewport has horizontal overflow")
+        overflow_detail = _mobile_overflow_detail(mobile_probe)
+        markers.append(f"STEP_FAIL|mobile-review|mobile/narrow viewport has horizontal overflow{overflow_detail}")
         findings.append(_browser_finding(
             "mobile-review-overflow",
             "Phone review has horizontal overflow",
@@ -992,7 +1031,7 @@ def _build_customer_findings(
             "A customer reviewing the result from a phone may miss content or lose confidence in polish.",
             "Approval and stakeholder review are weaker on mobile.",
             "Every narrow-screen review session.",
-            "Fix responsive layout and verify the customer report/action path on a phone-width viewport.",
+            "Fix the overflowing element(s), then verify the customer report/action path on a phone-width viewport.",
         ))
     elif mobile_probe:
         markers.append(
@@ -1043,6 +1082,25 @@ def _build_customer_findings(
 
 def _contains_any(text: str, terms: Sequence[str]) -> bool:
     return any(term in text for term in terms)
+
+
+def _mobile_overflow_detail(mobile_probe: dict) -> str:
+    detail_parts: list[str] = []
+    if mobile_probe.get("overflowWidth"):
+        detail_parts.append(f"overflowWidth={mobile_probe.get('overflowWidth')}")
+    offenders = mobile_probe.get("overflowOffenders")
+    if isinstance(offenders, list):
+        offender_texts: list[str] = []
+        for offender in offenders[:3]:
+            if not isinstance(offender, dict):
+                continue
+            label = str(offender.get("selector") or offender.get("tag") or "element")
+            text = str(offender.get("text") or "").strip()
+            width = offender.get("width")
+            offender_texts.append(f"{label} width={width}: {text[:60]}".strip())
+        if offender_texts:
+            detail_parts.append("offenders=" + " | ".join(offender_texts))
+    return "; " + "; ".join(detail_parts) if detail_parts else ""
 
 
 def _domain_terms(profile: CustomerProfile, target: ExperienceTarget, plan: CustomerTestPlan) -> list[str]:

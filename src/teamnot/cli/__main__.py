@@ -485,7 +485,7 @@ def customer_flow_session(
             runner=CustomerLoopRunnerName.openclaw_windows_flow,
             flow_path=out_dir / "runnable_flow.yaml",
         ))
-        report = OpenClawWindowsFlowRunner(runnable).run(target_model, profile, plan, out_dir)
+        report = OpenClawWindowsFlowRunner(runnable, wrapper_path=wrapper_path).run(target_model, profile, plan, out_dir)
         write_report_artifacts(out_dir, profile, plan, report)
         (out_dir / "flow_refinement_report.md").write_text(
             render_flow_refinement_report(inspected, runnable, report),

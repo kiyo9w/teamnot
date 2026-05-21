@@ -212,6 +212,8 @@ def test_openclaw_runner_reports_customer_findings_from_real_browser_probe(tmp_p
                     '"timingMs": 500,'
                     '"failedResources": ["https://example-product.test/missing.css"],'
                     '"hasHorizontalOverflow": true,'
+                    '"overflowWidth": 420,'
+                    '"overflowOffenders": [{"selector": "pre.log", "tag": "pre", "text": "long command output", "width": 620}],'
                     '"focusableCount": 1,'
                     '"imagesWithoutAlt": 0,'
                     '"landmarkCount": 0,'
@@ -235,6 +237,8 @@ def test_openclaw_runner_reports_customer_findings_from_real_browser_probe(tmp_p
     assert "unlabeled-controls" in finding_ids
     assert "missing-error-recovery-cues" in finding_ids
     assert "STEP_FAIL|first-impression" in report.evidence[0].raw_excerpt
+    assert "overflowWidth=420" in report.evidence[0].raw_excerpt
+    assert "pre.log width=620: long command output" in report.evidence[0].raw_excerpt
     assert len(report.evidence[0].screenshot_paths) == 3
 
 
@@ -445,6 +449,64 @@ def test_openclaw_flow_runner_executes_configured_customer_steps(tmp_path: Path)
     assert len(report.evidence[1].screenshot_paths) == 3
     assert any(cmd[1:3] == ["--action", "upload"] for cmd in commands)
     assert report.findings == []
+
+
+def test_openclaw_flow_runner_explains_missing_upload_wrapper_support(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    csv = tmp_path / "products.csv"
+    csv.write_text("Handle,Title\nexample,Example\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def command_runner(command):
+        commands.append(list(command))
+        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
+        if action == "navigate":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "title": "Mock"}', stderr="")
+        if action == "viewport":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+        if action == "upload":
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="unknown action upload")
+        if action == "eval":
+            if any(
+                cmd[2] == "viewport" and "--width" in cmd and cmd[cmd.index("--width") + 1] == "390"
+                for cmd in commands if len(cmd) > 2
+            ):
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout='{"ok": true, "result": {"viewport": {"width": 390, "height": 844}, "hasHorizontalOverflow": false}}',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"ok": true, "result": {'
+                    '"title": "Mock Product",'
+                    '"headings": ["Mock Product"],'
+                    '"buttons": ["Run preflight"],'
+                    '"inputs": [{"tag": "input", "type": "file", "label": "CSV file"}],'
+                    '"bodyText": "Upload CSV, run preflight, fix invalid files, download report, privacy support demo team.",'
+                    '"semanticSignals": {"hasPricing": true, "hasSupport": true, "hasPrivacy": true, "hasSample": true, "hasErrorRecovery": true, "hasCollaboration": true},'
+                    '"failedResources": [], "hasHorizontalOverflow": false, "focusableCount": 2, "imagesWithoutAlt": 0, "landmarkCount": 2'
+                    "}}"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    flow = CustomerFlow(
+        name="Upload CSV",
+        steps=[CustomerFlowStep(id="upload-csv", action="upload", selector="#csv-file", file=csv)],
+    )
+    target, profile, plan = _plan(tmp_path)
+
+    with pytest.raises(CustomerLoopRunnerError, match="requires browser wrapper upload support"):
+        OpenClawWindowsFlowRunner(flow, wrapper_path=wrapper, command_runner=command_runner).run(
+            target, profile, plan, tmp_path / "out"
+        )
 
 
 def test_openclaw_flow_runner_executes_multi_screen_non_upload_flow_pack(tmp_path: Path):
