@@ -18,10 +18,13 @@ from teamnot.customer_loop import (
 )
 from teamnot.customer_loop.artifacts import render_customer_report
 from teamnot.customer_loop.models import (
+    CustomerEvidence,
     CustomerFlow,
     CustomerFlowPack,
     CustomerFlowStep,
     CustomerLoopConfig,
+    CustomerReport,
+    CustomerScores,
 )
 from teamnot.customer_loop.orchestrator import default_customer_test_plan
 from teamnot.customer_loop.runners import _path_for_windows_wrapper, _resolve_wrapper_path
@@ -679,8 +682,73 @@ def test_manual_evidence_extracts_markdown_label_blocks(tmp_path: Path):
     assert "## Method" in rendered
     assert "## Persona Tested" in rendered
     assert "## Test Plan" in rendered
+    assert "## Dimension Assessment" in rendered
+    assert "## Researcher Observations" in rendered
+    assert "## Customer Journey Notes" in rendered
     assert "## Customer Objections" in rendered
     assert "## Recommended Next Iteration" in rendered
+
+
+def test_customer_report_renders_multidimensional_research_synthesis(tmp_path: Path):
+    target, profile, plan = _plan(tmp_path)
+    profile.alternatives = ["Cursor", "Claude Code"]
+    profile.trust_threshold = "Needs proof before real repository access"
+    report = CustomerReport(
+        profile=profile,
+        target=target,
+        plan=plan,
+        scores=CustomerScores(task_success=6, usability=6, trust_readiness=6, buying_readiness=6),
+        evidence=[
+            CustomerEvidence(
+                kind="browser_observation",
+                observed_behavior="Baseline probe completed.",
+                raw_excerpt="\n".join([
+                    "STEP_PASS|first-impression|clear product heading",
+                    "STEP_PASS|customer-promise|specific customer problem",
+                    "STEP_FAIL|error-recovery|no recovery copy",
+                    "STEP_SKIP|jtbd-forces|requires interpretation",
+                    "STEP_SKIP|buyer-user-mismatch|requires budget owner review",
+                ]),
+            ),
+            CustomerEvidence(
+                kind="browser_flow",
+                observed_behavior="Configured flow pack executed.",
+                raw_excerpt="STEP_PASS|flow-create-project-start|started customer flow",
+                metadata={
+                    "flow_pack": {
+                        "flows": [
+                            {
+                                "name": "Create project",
+                                "start_url": "/projects",
+                                "steps": [
+                                    {"id": "screen", "action": "assert_selector"},
+                                    {"id": "outcome", "action": "checkpoint"},
+                                ],
+                            }
+                        ]
+                    },
+                    "flows": [{"flow": "Create project", "id": "screen", "passed": True}],
+                },
+            ),
+        ],
+    )
+
+    rendered = render_customer_report(report)
+
+    assert "## Customer Journey Notes" in rendered
+    assert "- First impression: passed: clear product heading" in rendered
+    assert "## Route-By-Route Analysis" in rendered
+    assert "Create project (`/projects`): covered; 1 executable step(s), 1 interpretation checkpoint(s)." in rendered
+    assert "## Dimension Assessment" in rendered
+    assert "- Error recovery: 6/10 — failed: no recovery copy" in rendered
+    assert "## Researcher Observations" in rendered
+    assert "- Positive signal: first-impression — clear product heading" in rendered
+    assert "- Risk signal: error-recovery — no recovery copy" in rendered
+    assert "- Needs interpretation: jtbd-forces — requires interpretation" in rendered
+    assert "What proof satisfies this trust threshold" in rendered
+    assert "Why switch from Cursor, Claude Code?" in rendered
+    assert "## Next Research Actions" in rendered
+    assert "Run a JTBD pass" in rendered
 
 
 def test_runner_enum_values_are_stable():

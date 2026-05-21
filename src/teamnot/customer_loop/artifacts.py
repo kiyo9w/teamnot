@@ -1,6 +1,7 @@
 """Artifact writing for customer-loop runs."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from teamnot.customer_loop.io import save_json, save_yaml
@@ -54,6 +55,18 @@ def render_customer_report(report: CustomerReport) -> str:
         ])
     lines.extend([
         "",
+        "## Customer Journey Notes",
+        *_render_customer_journey_notes(report),
+        "",
+        "## Route-By-Route Analysis",
+        *_render_route_analysis(report),
+        "",
+        "## Dimension Assessment",
+        *_render_dimension_assessment(report),
+        "",
+        "## Researcher Observations",
+        *_render_researcher_observations(report),
+        "",
         "## Customer Objections",
         *_render_customer_objections(report),
         "",
@@ -65,6 +78,9 @@ def render_customer_report(report: CustomerReport) -> str:
         "",
         "## Recommended Next Iteration",
         *_render_next_iteration(report),
+        "",
+        "## Next Research Actions",
+        *_render_next_research_actions(report),
     ])
     lines.extend([
         "",
@@ -154,10 +170,20 @@ def _render_test_plan(plan: CustomerTestPlan) -> list[str]:
 
 def _render_customer_objections(report: CustomerReport) -> list[str]:
     objections = []
+    raw = _raw_evidence(report)
+    profile = report.profile
+    if profile.trust_threshold:
+        objections.append(f"- What proof satisfies this trust threshold: {profile.trust_threshold}?")
+    if profile.alternatives:
+        objections.append(f"- Why switch from {', '.join(profile.alternatives[:3])}?")
     if any(finding.trust_blocker for finding in report.findings):
         objections.append("- Can I trust this with real production data?")
     if any(finding.core_task_blocker for finding in report.findings):
         objections.append("- Can I complete the core workflow without expert help?")
+    if "STEP_SKIP|jtbd-forces" in raw:
+        objections.append("- What push, pull, anxiety, and existing habit would make this worth adopting now?")
+    if "STEP_SKIP|buyer-user-mismatch" in raw:
+        objections.append("- Does this satisfy both the daily user and the budget/security owner?")
     if report.scores.buying_readiness < 7:
         objections.append("- What is the pilot, support, or buying path?")
     if report.scores.output_actionability < 7:
@@ -202,6 +228,133 @@ def _render_next_iteration(report: CustomerReport) -> list[str]:
         finding.confidence,
     ), reverse=True)[0]
     return [f"- Fix `{top.id}`: {top.recommendation or top.title}"]
+
+
+def _render_customer_journey_notes(report: CustomerReport) -> list[str]:
+    markers = _markers(report)
+    notes = []
+    notes.append(_journey_note(markers, "first-impression", "First impression"))
+    notes.append(_journey_note(markers, "customer-promise", "Need clarity"))
+    notes.append(_journey_note(markers, "core-workflow-cues", "Activation path"))
+    notes.append(_journey_note(markers, "primary-workflow", "Primary workflow"))
+    notes.append(_journey_note(markers, "output-actionability", "Output interpretation"))
+    notes.append(_journey_note(markers, "error-recovery", "Mistake recovery"))
+    notes.append(_journey_note(markers, "trust-copy", "Trust and risk"))
+    notes.append(_journey_note(markers, "mobile-review", "Mobile review"))
+    return [note for note in notes if note]
+
+
+def _render_route_analysis(report: CustomerReport) -> list[str]:
+    flow_evidence = next((item for item in report.evidence if item.kind == "browser_flow"), None)
+    if not flow_evidence:
+        return ["- No configured multi-route flow evidence was captured."]
+    flow_pack = flow_evidence.metadata.get("flow_pack", {}) if isinstance(flow_evidence.metadata, dict) else {}
+    flows = flow_pack.get("flows", []) if isinstance(flow_pack, dict) else []
+    results = flow_evidence.metadata.get("flows", []) if isinstance(flow_evidence.metadata, dict) else []
+    failed_by_flow = {
+        str(result.get("flow")) for result in results
+        if isinstance(result, dict) and result.get("passed") is False
+    }
+    lines = []
+    for flow in flows:
+        if not isinstance(flow, dict):
+            continue
+        name = str(flow.get("name", "Unnamed flow"))
+        route = str(flow.get("start_url", "") or report.target.url)
+        steps = flow.get("steps", [])
+        executable = sum(
+            1 for step in steps
+            if isinstance(step, dict) and step.get("action") not in {"checkpoint"}
+        )
+        checkpoints = sum(
+            1 for step in steps
+            if isinstance(step, dict) and step.get("action") == "checkpoint"
+        )
+        status = "failed" if name in failed_by_flow else "covered"
+        lines.append(
+            f"- {name} (`{route}`): {status}; {executable} executable step(s), "
+            f"{checkpoints} interpretation checkpoint(s)."
+        )
+    return lines or ["- Multi-route evidence existed but no flow metadata was available."]
+
+
+def _render_dimension_assessment(report: CustomerReport) -> list[str]:
+    markers = _markers(report)
+    dimensions = [
+        ("Need clarity", "customer-promise", report.scores.value),
+        ("Problem-solution fit", "domain-fit", report.scores.domain_fit),
+        ("Workflow fit", "primary-workflow", report.scores.task_success),
+        ("Output usefulness", "output-actionability", report.scores.output_actionability),
+        ("Error recovery", "error-recovery", report.scores.task_success),
+        ("Trust and risk", "trust-copy", report.scores.trust_readiness),
+        ("Commercial/adoption path", "adoption-readiness", report.scores.buying_readiness),
+        ("Mobile and accessibility", "mobile-review", report.scores.usability),
+        ("Reliability", "resource-health", report.scores.technical_reliability),
+        ("Emotional confidence", "emotional-confidence", report.scores.emotional_confidence),
+        ("Buyer/user fit", "buyer-user-mismatch", report.scores.buying_readiness),
+    ]
+    return [
+        f"- {label}: {score}/10 — {_marker_status(markers, marker_id)}"
+        for label, marker_id, score in dimensions
+    ]
+
+
+def _render_researcher_observations(report: CustomerReport) -> list[str]:
+    markers = _markers(report)
+    pass_markers = [marker for marker in markers if marker[0] == "STEP_PASS"]
+    fail_markers = [marker for marker in markers if marker[0] == "STEP_FAIL"]
+    skip_markers = [marker for marker in markers if marker[0] == "STEP_SKIP"]
+    observations = []
+    observations.extend(f"- Positive signal: {marker_id} — {detail}" for _, marker_id, detail in pass_markers[:8])
+    observations.extend(f"- Risk signal: {marker_id} — {detail}" for _, marker_id, detail in fail_markers[:8])
+    observations.extend(f"- Needs interpretation: {marker_id} — {detail}" for _, marker_id, detail in skip_markers[:8])
+    return observations or ["- No structured researcher observations were captured."]
+
+
+def _render_next_research_actions(report: CustomerReport) -> list[str]:
+    actions = []
+    raw = _raw_evidence(report)
+    if "STEP_SKIP|jtbd-forces" in raw:
+        actions.append("- Run a JTBD pass: push, pull, anxiety, habit, trigger, and success metric.")
+    if "STEP_SKIP|buyer-user-mismatch" in raw:
+        actions.append("- Add a buyer/security/manager persona and compare objections against the daily user.")
+    if "STEP_FAIL|mobile-review" in raw:
+        actions.append("- Re-run the highest-value flow on phone width after fixing mobile layout offenders.")
+    if "STEP_FAIL|error-recovery" in raw:
+        actions.append("- Exercise a realistic invalid-input or failed-action path instead of only checking recovery copy.")
+    if any(evidence.kind == "browser_flow" for evidence in report.evidence):
+        actions.append("- Deepen the auto-discovered route map with auth/stateful screens if a test account is available.")
+    return actions or ["- No additional research action was triggered by this run."]
+
+
+def _markers(report: CustomerReport) -> list[tuple[str, str, str]]:
+    markers: list[tuple[str, str, str]] = []
+    for line in _raw_evidence(report).splitlines():
+        match = re.match(r"^(STEP_(?:PASS|FAIL|SKIP))\|([^|]+)\|(.*)$", line.strip())
+        if match:
+            markers.append((match.group(1), match.group(2), match.group(3)))
+    return markers
+
+
+def _raw_evidence(report: CustomerReport) -> str:
+    return "\n".join(evidence.raw_excerpt for evidence in report.evidence)
+
+
+def _journey_note(markers: list[tuple[str, str, str]], marker_id: str, label: str) -> str:
+    status = _marker_status(markers, marker_id)
+    return f"- {label}: {status}" if status != "not covered by this run" else ""
+
+
+def _marker_status(markers: list[tuple[str, str, str]], marker_id: str) -> str:
+    for status, current_id, detail in markers:
+        if current_id == marker_id or current_id.endswith(f"-{marker_id}") or marker_id in current_id:
+            label = {
+                "STEP_PASS": "passed",
+                "STEP_FAIL": "failed",
+                "STEP_SKIP": "needs interpretation",
+            }.get(status, status.lower())
+            return f"{label}: {detail}"
+    return "not covered by this run"
 
 
 def _render_field(label: str, value: str) -> str:
