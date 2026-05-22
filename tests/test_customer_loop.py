@@ -103,7 +103,9 @@ def test_report_artifacts_write_redacted_seeded_state_and_vision_metadata(tmp_pa
     assert "***REDACTED***" in seeded_text
     assert "18801" in (tmp_path / "out" / "browser_runtime.yaml").read_text(encoding="utf-8")
     assert (tmp_path / "out" / "vision_review.yaml").exists()
+    assert (tmp_path / "out" / "customer_testing_skill_coverage.yaml").exists()
     assert "Visual Evidence Review" in report_text
+    assert "OpenClaw Skill Coverage" in report_text
     assert "no model visual judgment" in report_text
     assert "CDP port: 18801" in report_text
 

@@ -38,6 +38,9 @@ def render_customer_report(report: CustomerReport) -> str:
         "## Test Plan",
         *_render_test_plan(report.plan),
         "",
+        "## OpenClaw Skill Coverage",
+        *_render_skill_coverage(report),
+        "",
         "## Research Lens",
         *_render_research_lens(report),
         "",
@@ -184,6 +187,19 @@ def _render_test_plan(plan: CustomerTestPlan) -> list[str]:
     ]
     for task in plan.tasks:
         lines.append(f"- {task.id}: {task.title}")
+    return lines
+
+
+def _render_skill_coverage(report: CustomerReport) -> list[str]:
+    matrix = _customer_testing_skill_coverage(report)
+    covered = len([item for item in matrix if item["status"] == "covered"])
+    partial = len([item for item in matrix if item["status"] == "partial"])
+    gap = len([item for item in matrix if item["status"] == "gap"])
+    lines = [f"- Summary: {covered} covered, {partial} partial, {gap} gap."]
+    lines.extend(
+        f"- {item['status'].upper()}: {item['id']} — {item['evidence']}"
+        for item in matrix
+    )
     return lines
 
 
@@ -555,6 +571,63 @@ def _raw_evidence(report: CustomerReport) -> str:
     return "\n".join(evidence.raw_excerpt for evidence in report.evidence)
 
 
+def _customer_testing_skill_coverage(report: CustomerReport) -> list[dict[str, str]]:
+    markers = _markers(report)
+    marker_ids = {marker_id for _, marker_id, _ in markers}
+    raw_text = "\n".join(
+        " ".join([
+            evidence.kind,
+            evidence.observed_behavior,
+            evidence.raw_excerpt,
+            " ".join(evidence.screenshot_paths),
+        ])
+        for evidence in report.evidence
+    ).lower()
+    finding_text = "\n".join(
+        " ".join([
+            finding.id,
+            finding.title,
+            finding.customer_interpretation,
+            finding.recommendation,
+        ])
+        for finding in report.findings
+    ).lower()
+    all_text = f"{raw_text}\n{finding_text}"
+
+    def has_marker(*needles: str) -> bool:
+        return any(any(needle in marker_id for needle in needles) for marker_id in marker_ids)
+
+    def has_text(*needles: str) -> bool:
+        return any(needle in all_text for needle in needles)
+
+    def entry(criterion_id: str, status: str, evidence: str) -> dict[str, str]:
+        return {"id": criterion_id, "status": status, "evidence": evidence}
+
+    visual_status = "covered" if report.vision_review and report.vision_review.review_kind == "model_vision" else (
+        "partial" if report.vision_review else "gap"
+    )
+    seeded_status = report.seeded_state.adapter_status if report.seeded_state else "absent"
+    return [
+        entry("first-impression", "covered" if has_marker("first-impression") else "partial", "first-screen purpose and visual impression were inspected."),
+        entry("customer-promise", "covered" if has_marker("customer-promise") or has_text("customer promise", "value proposition") else "partial", "customer promise/audience specificity was evaluated."),
+        entry("core-task", "covered" if has_marker("primary-workflow", "flow-") else "partial", "primary workflow or generated flow pack was exercised."),
+        entry("output-actionability", "covered" if has_marker("output-actionability") or has_text("output", "share", "export") else "partial", "output usefulness/shareability was judged."),
+        entry("error-recovery", "covered" if has_marker("error-recovery", "empty-submit", "invalid") else "partial", "mistake and recovery paths were probed or flagged."),
+        entry("mobile-review", "covered" if has_marker("mobile") or has_text("mobile", "phone") else "partial", "phone-width review was captured or assessed."),
+        entry("accessibility-basics", "covered" if has_text("accessibility", "label", "heading", "focus") else "partial", "labels/headings/focus cues were checked at least heuristically."),
+        entry("reliability", "covered" if has_text("timing", "failedresources", "runtime", "performance") else "partial", "load/runtime/resource reliability signals were collected."),
+        entry("trust-adoption", "covered" if has_marker("trust") or has_text("privacy", "data-handling", "trust") else "partial", "trust, data handling, onboarding, and buyer objections were assessed."),
+        entry("domain-fit", "covered" if report.domain_oracles or has_text("domain", "workflow", "terminology") else "partial", "domain language/output correctness was checked or marked as a gap."),
+        entry("time-to-value", "covered" if has_text("time-to-first-value", "time-to-value", "first useful") else "partial", "speed to first useful result was evaluated."),
+        entry("switching-friction", "covered" if report.jtbd_forces or has_text("switch", "habit", "alternatives") else "partial", "JTBD switching forces or alternatives were captured."),
+        entry("buyer-user-mismatch", "covered" if report.persona_lenses or has_text("buyer", "budget owner", "security") else "partial", "daily-user vs buyer/security concerns were separated."),
+        entry("emotional-confidence", "covered" if has_text("emotional", "confidence", "anxiety", "feel safer") else "partial", "customer anxiety/confidence was evaluated."),
+        entry("recommendation-clarity", "covered" if any(finding.recommendation for finding in report.findings) else "gap", "findings include concrete next recommendations."),
+        entry("model-vision", visual_status, f"vision review kind: {report.vision_review.review_kind if report.vision_review else 'none'}."),
+        entry("seeded-auth-depth", "covered" if seeded_status == "applied" else "gap", f"seeded state status: {seeded_status}."),
+    ]
+
+
 def _journey_note(markers: list[tuple[str, str, str]], marker_id: str, label: str) -> str:
     status = _marker_status(markers, marker_id)
     return f"- {label}: {status}" if status != "not covered by this run" else ""
@@ -649,6 +722,7 @@ def write_report_artifacts(
         save_yaml({"oracles": [oracle.model_dump(mode="json") for oracle in report.domain_oracles]}, out / "domain_oracles.yaml")
     if report.action_memory:
         save_yaml({"action_memory": [item.model_dump(mode="json") for item in report.action_memory]}, out / "research_action_memory.yaml")
+    save_yaml({"coverage": _customer_testing_skill_coverage(report)}, out / "customer_testing_skill_coverage.yaml")
     (out / "customer_report.md").write_text(render_customer_report(report), encoding="utf-8")
     return out
 

@@ -1202,6 +1202,7 @@ def test_manual_evidence_extracts_markdown_label_blocks(tmp_path: Path):
     assert "## Method" in rendered
     assert "## Persona Tested" in rendered
     assert "## Test Plan" in rendered
+    assert "## OpenClaw Skill Coverage" in rendered
     assert "## Dimension Assessment" in rendered
     assert "## Researcher Observations" in rendered
     assert "## Customer Journey Notes" in rendered
@@ -1271,6 +1272,7 @@ def test_customer_report_renders_multidimensional_research_synthesis(tmp_path: P
     assert "Trust threshold: Needs proof before real repository access" in rendered
     assert "- First impression: passed: clear product heading" in rendered
     assert "## Route-By-Route Analysis" in rendered
+    assert "model-vision" in rendered
     assert "Create project (`/projects`): partially covered; 1 executable step(s), 1 interpretation checkpoint(s)." in rendered
     assert "Invite teammate (`/settings/team`): not executed; 1 executable step(s), 0 interpretation checkpoint(s)." in rendered
     assert "## Dimension Assessment" in rendered
