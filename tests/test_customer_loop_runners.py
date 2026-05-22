@@ -277,6 +277,10 @@ def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):
         ["--action", "navigate"],
         ["--action", "viewport"],
     ]
+    viewport_indexes = [index for index, cmd in enumerate(commands) if cmd[1:3] == ["--action", "viewport"]]
+    screenshot_indexes = [index for index, cmd in enumerate(commands) if cmd[1:3] == ["--action", "screenshot"]]
+    assert len(viewport_indexes) >= 2
+    assert all(index < viewport_indexes[1] for index in screenshot_indexes[:2])
     assert any(cmd[1:3] == ["--action", "screenshot"] for cmd in commands)
     assert report.evidence[0].kind == "browser_observation"
     assert "first-impression" in report.evidence[0].raw_excerpt
@@ -359,6 +363,70 @@ def test_researcher_applies_seeded_state_contract_through_browser_adapter(tmp_pa
         "loginHint",
     ]
     assert "secret" in commands[1][commands[1].index("--cookies") + 1]
+
+
+def test_researcher_does_not_mark_login_hint_only_seeded_state_as_applied(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def command_runner(command):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                '{"ok": true, "seededStateApplied": false, '
+                '"unsupportedBlocker": "loginHint records account metadata only"}'
+            ),
+            stderr="",
+        )
+
+    state = SeededCustomerState(
+        test_account=SeededTestAccount(
+            email="customer@example.test",
+            login_url="https://example-product.test/auth/login",
+        )
+    )
+    target, _profile_model, _plan_model = _plan(tmp_path)
+
+    result = OpenClawWindowsResearcherRunner(
+        wrapper_path=wrapper,
+        command_runner=command_runner,
+        seeded_state=state,
+    )._apply_seeded_state(target, state)
+
+    assert result["status"] == "unsupported"
+    assert state.adapter_status == "unsupported"
+    assert "metadata only" in state.unsupported_blocker
+
+
+def test_researcher_records_seed_adapter_rejection_as_blocker(tmp_path: Path):
+    wrapper = tmp_path / "scripts" / "winbrowser"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    storage = tmp_path / "storage-state.json"
+    storage.write_text('{"cookies": []}', encoding="utf-8")
+
+    def command_runner(command):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='{"ok": false, "unsupportedBlocker": "bad storage"}',
+            stderr="",
+        )
+
+    state = SeededCustomerState(storage_state_path=storage)
+    target, _profile_model, _plan_model = _plan(tmp_path)
+
+    result = OpenClawWindowsResearcherRunner(
+        wrapper_path=wrapper,
+        command_runner=command_runner,
+        seeded_state=state,
+    )._apply_seeded_state(target, state)
+
+    assert result["status"] == "unsupported"
+    assert state.adapter_status == "unsupported"
+    assert state.unsupported_blocker == "bad storage"
 
 
 def test_noop_action_memory_suppresses_repeated_actions():

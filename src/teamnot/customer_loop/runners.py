@@ -248,11 +248,14 @@ class OpenClawWindowsCDPRunner:
         self._try_run(["--action", "viewport", "--width", "1280", "--height", "900"])
         probe = _parse_json_stdout(self._run(["--action", "eval", "--expr", _CUSTOMER_PROBE_JS]))
         result = probe.get("result", probe)
+        desktop_records = [
+            self._try_screenshot_record(first_impression, first_impression_out, route="/", action="first_impression"),
+            self._try_screenshot_record(full_page, full_page_out, full_page=True, route="/", action="full_page"),
+        ]
         mobile_viewport = self._try_run(["--action", "viewport", "--width", "390", "--height", "844"])
         mobile_probe = _parse_json_stdout(self._run(["--action", "eval", "--expr", _MOBILE_PROBE_JS])).get("result", {})
         screenshot_records = [
-            self._try_screenshot_record(first_impression, first_impression_out, route="/", action="first_impression"),
-            self._try_screenshot_record(full_page, full_page_out, full_page=True, route="/", action="full_page"),
+            *desktop_records,
             self._try_screenshot_record(mobile_review, mobile_review_out, route="/", action="mobile_review"),
         ]
         screenshot_status = {
@@ -1160,7 +1163,7 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
                 "--login-url", account.login_url or seeded_state.login_url or str(target.url),
                 "--workspace-id", account.workspace_id or seeded_state.workspace_id,
             ]))
-        if results and any(item.get("ok") for item in results):
+        if results and any(_seed_result_applied(item) for item in results):
             status = "applied"
         elif results:
             blocker = "; ".join(str(item.get("unsupportedBlocker") or item.get("error") or item) for item in results)
@@ -1172,10 +1175,27 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
         return {"status": status, "unsupported_blocker": blocker, "results": results}
 
     def _try_seed_command(self, args: list[str]) -> dict:
-        result = self._try_run(args)
-        if result is None:
-            return {"ok": False, "unsupportedBlocker": f"adapter did not accept {args[1] if len(args) > 1 else args[0]}"}
-        return _parse_json_stdout(result)
+        command = [str(self.wrapper_path), *args]
+        action = args[1] if len(args) > 1 and args[0] == "--action" else args[0]
+        try:
+            result = self.command_runner(command)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "action": action, "unsupportedBlocker": f"adapter timed out during {action}"}
+        if result.returncode != 0:
+            return {
+                "ok": False,
+                "action": action,
+                "unsupportedBlocker": result.stderr.strip() or f"adapter did not accept {action}",
+            }
+        try:
+            parsed = json.loads((result.stdout or "").strip() or "{}")
+        except json.JSONDecodeError:
+            return {
+                "ok": False,
+                "action": action,
+                "unsupportedBlocker": f"adapter returned non-JSON output for {action}: {result.stdout[:200]}",
+            }
+        return parsed if isinstance(parsed, dict) else {"ok": True, "action": action, "result": parsed}
 
 
 def _first_nonempty_line(text: str) -> str:
@@ -1212,6 +1232,16 @@ def _json_arg(args: Sequence[str], name: str, default):
         return json.loads(raw)
     except json.JSONDecodeError:
         return default
+
+
+def _seed_result_applied(result: dict) -> bool:
+    if result.get("seededStateApplied") is True:
+        return True
+    for key in ("cookiesApplied", "localStorageValuesApplied", "localStorageOriginsApplied"):
+        value = result.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return True
+    return False
 
 
 def _runtime_from_response(response: dict | None) -> BrowserRuntimeMetadata:
