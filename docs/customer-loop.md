@@ -177,10 +177,13 @@ Artifacts write `seeded_state_metadata.yaml` with passwords, cookies, and
 localStorage values redacted. Browser-capable adapters report whether state was
 `applied`, `metadata_only`, or `unsupported`; unsupported adapter behavior is a
 blocker in the artifact, not hidden as authenticated coverage. The Windows CDP
-session can apply cookies/localStorage and can attempt a Playwright
-`storageState` import. Login hints record account metadata only; TeamNoT does
-not type passwords into a product unless a project-specific flow explicitly
-models that action.
+session can apply cookies/localStorage, can attempt a Playwright `storageState`
+import, and can use `test_account.email/password/login_url` to perform a
+generic login through the Windows CDP adapter. The adapter only marks seeded
+auth as `applied` after it observes authenticated state such as a successful
+URL transition, logout/dashboard/account signals, or imported storage/cookies.
+If credentials are omitted, login hints record account metadata only and remain
+unsupported for authenticated-depth coverage.
 
 ## Domain Oracles
 

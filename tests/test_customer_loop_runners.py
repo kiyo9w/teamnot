@@ -173,11 +173,39 @@ def test_persistent_runner_maps_seeded_state_commands(monkeypatch, tmp_path: Pat
         "--cookies",
         '[{"name": "session", "value": "secret", "domain": "example.test"}]',
     ])
+    runner([
+        "scripts/winbrowser",
+        "--action",
+        "login",
+        "--email",
+        "customer@example.test",
+        "--password",
+        "secret",
+        "--login-url",
+        "https://example-product.test/auth/login",
+        "--success-url",
+        "https://example-product.test/app",
+        "--workspace-id",
+        "demo",
+        "--timeout",
+        "12000",
+    ])
 
-    assert sent_payloads == [{
-        "action": "setCookies",
-        "cookies": [{"name": "session", "value": "secret", "domain": "example.test"}],
-    }]
+    assert sent_payloads == [
+        {
+            "action": "setCookies",
+            "cookies": [{"name": "session", "value": "secret", "domain": "example.test"}],
+        },
+        {
+            "action": "login",
+            "email": "customer@example.test",
+            "password": "secret",
+            "loginUrl": "https://example-product.test/auth/login",
+            "successUrl": "https://example-product.test/app",
+            "workspaceId": "demo",
+            "timeout": 12000,
+        },
+    ]
 
 
 def test_persistent_runner_keeps_screenshots_and_eval_on_same_session(monkeypatch, tmp_path: Path):
@@ -337,8 +365,8 @@ def test_researcher_applies_seeded_state_contract_through_browser_adapter(tmp_pa
             return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "cookiesApplied": 1}', stderr="")
         if action == "setLocalStorage":
             return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "localStorageValuesApplied": 1}', stderr="")
-        if action == "loginHint":
-            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "seededStateApplied": false}', stderr="")
+        if action == "login":
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "seededStateApplied": true, "afterUrl": "https://example-product.test/app"}', stderr="")
         return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
 
     state = SeededCustomerState(
@@ -366,9 +394,10 @@ def test_researcher_applies_seeded_state_contract_through_browser_adapter(tmp_pa
         "importStorageState",
         "setCookies",
         "setLocalStorage",
-        "loginHint",
+        "login",
     ]
     assert "secret" in commands[1][commands[1].index("--cookies") + 1]
+    assert "secret" in commands[-1][commands[-1].index("--password") + 1]
 
 
 def test_researcher_does_not_mark_login_hint_only_seeded_state_as_applied(tmp_path: Path):

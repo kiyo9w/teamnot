@@ -156,8 +156,16 @@ class PersistentWinBrowserCommandRunner:
             payload["entries"] = _json_arg(args, "--entries", [])
         elif action == "loginHint":
             payload["email"] = _arg_value(args, "--email")
+            payload["password"] = _arg_value(args, "--password")
             payload["loginUrl"] = _arg_value(args, "--login-url")
             payload["workspaceId"] = _arg_value(args, "--workspace-id")
+        elif action == "login":
+            payload["email"] = _arg_value(args, "--email")
+            payload["password"] = _arg_value(args, "--password")
+            payload["loginUrl"] = _arg_value(args, "--login-url")
+            payload["successUrl"] = _arg_value(args, "--success-url")
+            payload["workspaceId"] = _arg_value(args, "--workspace-id")
+            payload["timeout"] = int(_arg_value(args, "--timeout", "30000") or "30000")
         elif action == "viewport":
             payload["width"] = int(_arg_value(args, "--width", "390") or "390")
             payload["height"] = int(_arg_value(args, "--height", "844") or "844")
@@ -1163,12 +1171,23 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
             ]))
         account = seeded_state.test_account
         if account:
-            results.append(self._try_seed_command([
-                "--action", "loginHint",
-                "--email", account.email,
-                "--login-url", account.login_url or seeded_state.login_url or str(target.url),
-                "--workspace-id", account.workspace_id or seeded_state.workspace_id,
-            ]))
+            login_url = account.login_url or seeded_state.login_url or str(target.url)
+            if account.email and account.password:
+                results.append(self._try_seed_command([
+                    "--action", "login",
+                    "--email", account.email,
+                    "--password", account.password,
+                    "--login-url", login_url,
+                    "--success-url", str(target.url),
+                    "--workspace-id", account.workspace_id or seeded_state.workspace_id,
+                ]))
+            else:
+                results.append(self._try_seed_command([
+                    "--action", "loginHint",
+                    "--email", account.email,
+                    "--login-url", login_url,
+                    "--workspace-id", account.workspace_id or seeded_state.workspace_id,
+                ]))
         if results and any(_seed_result_applied(item) for item in results):
             status = "applied"
         elif results:

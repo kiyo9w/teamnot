@@ -322,6 +322,9 @@ async function handle(command) {
       url: p.url(),
     };
   }
+  if (action === "login") {
+    return await performLogin(command);
+  }
   if (action === "eval") {
     if (!command.expr) throw new Error("Missing expr");
     await settlePage(p, Number(command.settleTimeout || 3000));
@@ -341,6 +344,130 @@ async function handle(command) {
     return { ok: true, action, cdp, sessionId };
   }
   throw new Error(`Unknown action: ${action}`);
+}
+
+async function performLogin(command) {
+  if (!command.email) throw new Error("Missing email");
+  if (!command.password) throw new Error("Missing password");
+  const p = await currentPage();
+  const targetUrl = command.loginUrl || p.url();
+  await p.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: Number(command.timeout || 30000) });
+  await settlePage(p);
+  const beforeUrl = p.url();
+  const beforeTitle = await p.title().catch(() => "");
+  const filled = await p.evaluate(({ email, password }) => {
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const inputs = Array.from(document.querySelectorAll("input,textarea")).filter(visible);
+    const labelFor = (el) => [
+      el.getAttribute("type") || "",
+      el.getAttribute("name") || "",
+      el.getAttribute("id") || "",
+      el.getAttribute("autocomplete") || "",
+      el.getAttribute("placeholder") || "",
+      el.getAttribute("aria-label") || "",
+    ].join(" ").toLowerCase();
+    const emailInput = inputs.find((el) => {
+      const label = labelFor(el);
+      return label.includes("email") || label.includes("username") || el.type === "email";
+    }) || inputs[0];
+    const passwordInput = inputs.find((el) => {
+      const label = labelFor(el);
+      return label.includes("password") || el.type === "password";
+    });
+    const setValue = (el, value) => {
+      if (!el) return false;
+      el.focus();
+      el.value = value;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    };
+    return {
+      emailFilled: setValue(emailInput, email),
+      passwordFilled: setValue(passwordInput, password),
+      inputCount: inputs.length,
+    };
+  }, { email: command.email, password: command.password });
+  if (!filled.emailFilled || !filled.passwordFilled) {
+    return {
+      ok: false,
+      action: "login",
+      cdp,
+      sessionId,
+      seededStateApplied: false,
+      unsupportedBlocker: `Login form could not be filled: emailFilled=${filled.emailFilled}, passwordFilled=${filled.passwordFilled}, inputCount=${filled.inputCount}`,
+      url: p.url(),
+      title: await p.title().catch(() => ""),
+    };
+  }
+  const submitted = await p.evaluate(() => {
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const controls = Array.from(document.querySelectorAll("button,input[type=submit],input[type=button],[role=button]")).filter(visible);
+    const submitter = controls.find((el) => {
+      const text = `${el.innerText || el.value || ""} ${el.getAttribute("aria-label") || ""}`.toLowerCase();
+      return /log.?in|sign.?in|continue|submit|start|register|join/.test(text);
+    }) || controls[0];
+    if (submitter) {
+      submitter.click();
+      return { clicked: true, label: submitter.innerText || submitter.value || submitter.getAttribute("aria-label") || "" };
+    }
+    const form = document.querySelector("form");
+    if (form) {
+      form.requestSubmit ? form.requestSubmit() : form.submit();
+      return { clicked: false, submittedForm: true };
+    }
+    return { clicked: false, submittedForm: false };
+  });
+  await p.waitForLoadState("domcontentloaded", { timeout: Number(command.timeout || 30000) }).catch(() => {});
+  await p.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
+  await p.waitForTimeout(1000).catch(() => {});
+  const afterUrl = p.url();
+  const afterTitle = await p.title().catch(() => "");
+  const authState = await p.evaluate(() => {
+    const text = (document.body?.innerText || "").slice(0, 3000);
+    const passwordInputs = document.querySelectorAll('input[type="password"]').length;
+    return {
+      textSample: text,
+      passwordInputs,
+      hasLogout: /log out|logout|sign out|signout/i.test(text),
+      hasDashboardSignal: /dashboard|settings|account|workspace|profile|team|billing|project|admin/i.test(text),
+      hasError: /invalid|incorrect|required|error|failed|try again/i.test(text),
+    };
+  }).catch(() => ({}));
+  const successUrl = command.successUrl || "";
+  const reachedSuccessUrl = successUrl && afterUrl.startsWith(successUrl);
+  const urlChanged = beforeUrl !== afterUrl;
+  const seededStateApplied = Boolean(
+    reachedSuccessUrl
+    || (urlChanged && !authState.hasError)
+    || authState.hasLogout
+    || (authState.hasDashboardSignal && authState.passwordInputs === 0)
+  );
+  return {
+    ok: seededStateApplied,
+    action: "login",
+    cdp,
+    sessionId,
+    seededStateApplied,
+    loginAttempted: true,
+    loginUrl: targetUrl,
+    beforeUrl,
+    afterUrl,
+    beforeTitle,
+    afterTitle,
+    submitted,
+    authState,
+    workspaceId: command.workspaceId || "",
+    unsupportedBlocker: seededStateApplied ? "" : "Login was attempted but authenticated state could not be verified.",
+  };
 }
 
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
