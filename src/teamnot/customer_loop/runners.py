@@ -230,7 +230,8 @@ class OpenClawWindowsCDPRunner:
         command_runner: CommandRunner | None = None,
     ):
         self.wrapper_path = _resolve_wrapper_path(wrapper_path)
-        self.command_runner = command_runner or self._default_runner
+        self._owns_persistent_session = command_runner is None
+        self.command_runner = command_runner or PersistentWinBrowserCommandRunner(self.wrapper_path)
 
     def run(
         self,
@@ -239,90 +240,94 @@ class OpenClawWindowsCDPRunner:
         plan: CustomerTestPlan,
         out_dir: Path,
     ) -> CustomerReport:
-        if not self.wrapper_path.exists():
-            raise CustomerLoopRunnerError(
-                "OpenClaw Windows CDP runner requires scripts/winbrowser. "
-                "Install or provide the wrapper, or use --runner manual --evidence FILE."
-            )
-        screenshots = out_dir / "screenshots"
-        screenshots.mkdir(parents=True, exist_ok=True)
-        first_impression = screenshots / "first-impression.png"
-        full_page = screenshots / "full-page.png"
-        mobile_review = screenshots / "mobile-review.png"
-        first_impression_out = _path_for_windows_wrapper(first_impression)
-        full_page_out = _path_for_windows_wrapper(full_page)
-        mobile_review_out = _path_for_windows_wrapper(mobile_review)
-        self._run(["--action", "status"])
-        navigate = _parse_json_stdout(self._run(["--action", "navigate", "--url", str(target.url)]))
-        self._try_run(["--action", "viewport", "--width", "1280", "--height", "900"])
-        probe = _parse_json_stdout(self._run(["--action", "eval", "--expr", _CUSTOMER_PROBE_JS]))
-        result = probe.get("result", probe)
-        desktop_records = [
-            self._try_screenshot_record(first_impression, first_impression_out, route="/", action="first_impression"),
-            self._try_screenshot_record(full_page, full_page_out, full_page=True, route="/", action="full_page"),
-        ]
-        mobile_viewport = self._try_run(["--action", "viewport", "--width", "390", "--height", "844"])
-        mobile_probe = _parse_json_stdout(self._run(["--action", "eval", "--expr", _MOBILE_PROBE_JS])).get("result", {})
-        screenshot_records = [
-            *desktop_records,
-            self._try_screenshot_record(mobile_review, mobile_review_out, route="/", action="mobile_review"),
-        ]
-        screenshot_status = {
-            "first_impression": screenshot_records[0].model_dump(mode="json"),
-            "full_page": screenshot_records[1].model_dump(mode="json"),
-            "mobile_review": screenshot_records[2].model_dump(mode="json"),
-        }
-        if isinstance(mobile_probe, dict):
-            result["mobileProbe"] = mobile_probe
-            result["mobileViewport"] = _parse_json_stdout(mobile_viewport) if mobile_viewport else {
-                "ok": False,
-                "reason": "scripts/winbrowser did not support viewport action",
+        try:
+            if not self.wrapper_path.exists():
+                raise CustomerLoopRunnerError(
+                    "OpenClaw Windows CDP runner requires scripts/winbrowser. "
+                    "Install or provide the wrapper, or use --runner manual --evidence FILE."
+                )
+            screenshots = out_dir / "screenshots"
+            screenshots.mkdir(parents=True, exist_ok=True)
+            first_impression = screenshots / "first-impression.png"
+            full_page = screenshots / "full-page.png"
+            mobile_review = screenshots / "mobile-review.png"
+            first_impression_out = _path_for_windows_wrapper(first_impression)
+            full_page_out = _path_for_windows_wrapper(full_page)
+            mobile_review_out = _path_for_windows_wrapper(mobile_review)
+            self._run(["--action", "status"])
+            navigate = _parse_json_stdout(self._run(["--action", "navigate", "--url", str(target.url)]))
+            self._try_run(["--action", "viewport", "--width", "1280", "--height", "900"])
+            probe = _parse_json_stdout(self._run(["--action", "eval", "--expr", _CUSTOMER_PROBE_JS]))
+            result = probe.get("result", probe)
+            desktop_records = [
+                self._try_screenshot_record(first_impression, first_impression_out, route="/", action="first_impression"),
+                self._try_screenshot_record(full_page, full_page_out, full_page=True, route="/", action="full_page"),
+            ]
+            mobile_viewport = self._try_run(["--action", "viewport", "--width", "390", "--height", "844"])
+            mobile_probe = _parse_json_stdout(self._run(["--action", "eval", "--expr", _MOBILE_PROBE_JS])).get("result", {})
+            screenshot_records = [
+                *desktop_records,
+                self._try_screenshot_record(mobile_review, mobile_review_out, route="/", action="mobile_review"),
+            ]
+            screenshot_status = {
+                "first_impression": screenshot_records[0].model_dump(mode="json"),
+                "full_page": screenshot_records[1].model_dump(mode="json"),
+                "mobile_review": screenshot_records[2].model_dump(mode="json"),
             }
-        markers, findings = _build_customer_findings(result, target, profile, plan)
-        scores = _score_customer_readiness(result, findings)
-        evidence = CustomerEvidence(
-            kind="browser_observation",
-            path=str(first_impression),
-            screenshot_paths=[str(first_impression), str(full_page), str(mobile_review)],
-            observed_behavior=_summarize_probe(result, markers),
-            raw_excerpt="\n".join(markers),
-            screenshot_captures=screenshot_records,
-            metadata={
-                "runner": "openclaw-windows-cdp",
-                "rubric": "customer-testing-openclaw",
-                "method": "real Windows Chrome/CDP customer-readiness probe",
-                "evidence_hierarchy": [
-                    "deterministic DOM/eval/performance checks",
-                    "first-impression and full-page screenshots",
-                    "mobile-review screenshot after viewport probe",
-                    "customer-impact findings",
-                ],
-                "navigate": navigate,
-                "probe": result,
-                "scores": scores.model_dump(),
-                "screenshot_status": screenshot_status,
-            },
-        )
-        for finding in findings:
-            finding.evidence.append(evidence)
-        report = CustomerReport(
-            profile=profile,
-            target=target,
-            plan=plan,
-            findings=findings,
-            scores=scores,
-            evidence=[evidence],
-            summary=(
-                "Customer-testing-openclaw browser test completed with Windows CDP. "
-                f"{len(findings)} customer-impact finding(s) identified."
-            ),
-            browser_runtime=_runtime_from_response(navigate),
-            screenshot_captures=screenshot_records,
-            vision_review=_review_screenshots(screenshot_records, target, profile),
-        )
-        _attach_visual_findings(report)
-        _attach_customer_panels(report)
-        return report
+            if isinstance(mobile_probe, dict):
+                result["mobileProbe"] = mobile_probe
+                result["mobileViewport"] = _parse_json_stdout(mobile_viewport) if mobile_viewport else {
+                    "ok": False,
+                    "reason": "scripts/winbrowser did not support viewport action",
+                }
+            markers, findings = _build_customer_findings(result, target, profile, plan)
+            scores = _score_customer_readiness(result, findings)
+            evidence = CustomerEvidence(
+                kind="browser_observation",
+                path=str(first_impression),
+                screenshot_paths=[str(first_impression), str(full_page), str(mobile_review)],
+                observed_behavior=_summarize_probe(result, markers),
+                raw_excerpt="\n".join(markers),
+                screenshot_captures=screenshot_records,
+                metadata={
+                    "runner": "openclaw-windows-cdp",
+                    "rubric": "customer-testing-openclaw",
+                    "method": "real Windows Chrome/CDP customer-readiness probe",
+                    "evidence_hierarchy": [
+                        "deterministic DOM/eval/performance checks",
+                        "first-impression and full-page screenshots",
+                        "mobile-review screenshot after viewport probe",
+                        "customer-impact findings",
+                    ],
+                    "navigate": navigate,
+                    "probe": result,
+                    "scores": scores.model_dump(),
+                    "screenshot_status": screenshot_status,
+                },
+            )
+            for finding in findings:
+                finding.evidence.append(evidence)
+            report = CustomerReport(
+                profile=profile,
+                target=target,
+                plan=plan,
+                findings=findings,
+                scores=scores,
+                evidence=[evidence],
+                summary=(
+                    "Customer-testing-openclaw browser test completed with Windows CDP. "
+                    f"{len(findings)} customer-impact finding(s) identified."
+                ),
+                browser_runtime=_runtime_from_response(navigate),
+                screenshot_captures=screenshot_records,
+                vision_review=_review_screenshots(screenshot_records, target, profile),
+            )
+            _attach_visual_findings(report)
+            _attach_customer_panels(report)
+            return report
+        finally:
+            if self._owns_persistent_session and isinstance(self.command_runner, PersistentWinBrowserCommandRunner):
+                self.command_runner.close()
 
     def _screenshot(self, path: Path) -> None:
         self._run(["--action", "screenshot", "--out", _path_for_windows_wrapper(path)])

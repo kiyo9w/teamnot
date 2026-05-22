@@ -23,10 +23,6 @@ const getArg = (name, fallback = "") => {
 
 const cdp = getArg("--cdp", process.env.TEAMNOT_CDP_URL || "http://127.0.0.1:18801");
 const browserName = getArg("--browser", "chrome").toLowerCase();
-const userDataDir = getArg(
-  "--user-data-dir",
-  path.join(os.homedir(), "OpenClawTools", "teamnot-chrome-cdp-profile"),
-);
 const sessionId = getArg("--session-id", `teamnot-${Date.now()}`);
 
 let browser = null;
@@ -65,6 +61,11 @@ function cdpPort() {
   }
 }
 
+const userDataDir = getArg(
+  "--user-data-dir",
+  path.join(os.homedir(), "OpenClawTools", `teamnot-chrome-cdp-profile-${cdpPort()}`),
+);
+
 async function startBrowser() {
   await fs.mkdir(userDataDir, { recursive: true });
   const child = spawn(browserExe(), [
@@ -95,7 +96,9 @@ async function ensureCdp() {
 async function ensureSession() {
   const ensured = await ensureCdp();
   if (!browser) {
-    browser = await chromium.connectOverCDP(cdp);
+    browser = await chromium.connectOverCDP(cdp, {
+      timeout: Number(getArg("--connect-timeout-ms", "15000")),
+    });
   }
   context = browser.contexts()[0] || await browser.newContext();
   if (!page || page.isClosed()) {
@@ -488,4 +491,7 @@ for await (const line of rl) {
       stack: String(err?.stack || "").split("\n").slice(0, 6).join("\n"),
     });
   }
+}
+if (browser) {
+  await browser.close().catch(() => {});
 }
