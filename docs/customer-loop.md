@@ -210,13 +210,29 @@ Browser runs write:
   route/action, method, retry/fallback metadata, success, hash, and dimensions
   when available.
 - `vision_review.yaml` with deterministic screenshot grouping, hash-change
-  heuristics, missing/blank capture blockers, and a `review_kind`.
+  heuristics, missing/blank capture blockers, model visual findings/action
+  hints when enabled, and a `review_kind`.
 
 The default reviewer is local and deterministic. It collects visual metadata and
 hash-level change signals only. Reports distinguish DOM/text evidence, visual
-metadata, heuristic screenshot health, and model visual judgment. Today the
-default is not model vision; a future subscription/local worker can plug into
-the same boundary and must label its evidence as visual judgment.
+metadata, heuristic screenshot health, and model visual judgment.
+
+Model vision can be enabled with:
+
+```bash
+TEAMNOT_VISION_WORKER=codex_cli uv run teamnot customer-test \
+  --runner openclaw-windows-researcher \
+  --target http://127.0.0.1:3000/ \
+  --profile customer_profile.yaml \
+  --out .teamnot/customer-loop/example-with-vision
+```
+
+When enabled, TeamNoT attaches successful screenshot files to `codex exec
+--image`, asks for structured JSON, stores visual findings/action hints in
+`vision_review.yaml`, and feeds those findings back into the customer report as
+`model_vision` evidence. If the CLI is unavailable, unauthenticated, or returns
+malformed output, the run falls back to deterministic screenshot metadata and
+records a model-vision blocker instead of overclaiming.
 
 ## Artifacts
 

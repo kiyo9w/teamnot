@@ -40,6 +40,7 @@ from teamnot.customer_loop.models import (
     ResearchActionMemory,
     ScreenshotCaptureRecord,
     SeededCustomerState,
+    VisionReviewArtifact,
 )
 from teamnot.customer_loop.research_planning import (
     action_memory_from_result,
@@ -48,7 +49,7 @@ from teamnot.customer_loop.research_planning import (
     synthesize_jtbd_forces,
     synthesize_persona_panel,
 )
-from teamnot.customer_loop.vision import DeterministicScreenshotReviewer
+from teamnot.customer_loop.vision import reviewer_from_environment
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
@@ -309,8 +310,9 @@ class OpenClawWindowsCDPRunner:
             ),
             browser_runtime=_runtime_from_response(navigate),
             screenshot_captures=screenshot_records,
-            vision_review=DeterministicScreenshotReviewer().review(screenshot_records),
+            vision_review=_review_screenshots(screenshot_records, target, profile),
         )
+        _attach_visual_findings(report)
         _attach_customer_panels(report)
         return report
 
@@ -457,7 +459,8 @@ class OpenClawWindowsInteractiveRunner(OpenClawWindowsCDPRunner):
         report.findings.extend(findings)
         captures = _collect_screenshot_captures(report)
         report.screenshot_captures = captures
-        report.vision_review = DeterministicScreenshotReviewer().review(captures)
+        report.vision_review = _review_screenshots(captures, target, profile)
+        _attach_visual_findings(report)
         _attach_customer_panels(report)
         report.scores = _score_customer_readiness(
             report.evidence[0].metadata.get("probe", {}) if report.evidence else {},
@@ -575,7 +578,8 @@ class OpenClawWindowsFlowRunner(OpenClawWindowsInteractiveRunner):
         report.findings.extend(findings)
         captures = _collect_screenshot_captures(report)
         report.screenshot_captures = captures
-        report.vision_review = DeterministicScreenshotReviewer().review(captures)
+        report.vision_review = _review_screenshots(captures, target, profile)
+        _attach_visual_findings(report)
         _attach_customer_panels(report)
         report.scores = _score_customer_readiness(
             report.evidence[0].metadata.get("probe", {}) if report.evidence else {},
@@ -700,7 +704,8 @@ class OpenClawWindowsSessionRunner(OpenClawWindowsCDPRunner):
             report.findings.extend(screen_findings)
             captures = _collect_screenshot_captures(report)
             report.screenshot_captures = captures
-            report.vision_review = DeterministicScreenshotReviewer().review(captures)
+            report.vision_review = _review_screenshots(captures, target, profile)
+            _attach_visual_findings(report)
             _attach_customer_panels(report)
             (out_dir / "flow_refinement_report.md").write_text(
                 render_flow_refinement_report(inspected, runnable, report),
@@ -963,7 +968,8 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
             ]
             captures = _collect_screenshot_captures(report)
             report.screenshot_captures = captures
-            report.vision_review = DeterministicScreenshotReviewer().review(captures)
+            report.vision_review = _review_screenshots(captures, target, profile)
+            _attach_visual_findings(report)
             report.browser_runtime = _merge_runtime(report.browser_runtime, research_brain.get("browser_runtime"))
             _attach_customer_panels(report)
             (out_dir / "flow_refinement_report.md").write_text(
@@ -1286,6 +1292,53 @@ def _attach_customer_panels(report: CustomerReport) -> None:
         report.persona_lenses = synthesize_persona_panel(report)
     if report.jtbd_forces is None:
         report.jtbd_forces = synthesize_jtbd_forces(report)
+
+
+def _review_screenshots(
+    captures: list[ScreenshotCaptureRecord],
+    target: ExperienceTarget,
+    profile: CustomerProfile,
+) -> VisionReviewArtifact:
+    return reviewer_from_environment(target=target, profile=profile).review(captures)
+
+
+def _attach_visual_findings(report: CustomerReport) -> None:
+    review = report.vision_review
+    if not review or not review.visual_findings:
+        return
+    existing_ids = {finding.id for finding in report.findings}
+    for index, visual in enumerate(review.visual_findings, start=1):
+        finding_id = f"vision-{_slug(visual.title) or index}"
+        if finding_id in existing_ids:
+            continue
+        evidence = CustomerEvidence(
+            kind="model_vision",
+            path=visual.evidence_paths[0] if visual.evidence_paths else "",
+            screenshot_paths=visual.evidence_paths,
+            observed_behavior=visual.customer_interpretation or visual.title,
+            raw_excerpt=visual.recommendation,
+            metadata={
+                "runner": "model-vision",
+                "model_worker": review.model_worker,
+                "review_kind": review.review_kind,
+                "action_hint": visual.action_hint,
+            },
+        )
+        report.evidence.append(evidence)
+        report.findings.append(_browser_finding(
+            finding_id,
+            visual.title,
+            visual.severity,
+            visual.customer_interpretation,
+            "The visual presentation can change customer trust, comprehension, or ability to proceed.",
+            "Every customer who encounters the reviewed screen state.",
+            visual.recommendation or visual.action_hint,
+            confidence=visual.confidence,
+            trust=visual.severity in {CustomerSeverity.critical, CustomerSeverity.high},
+            core=visual.severity in {CustomerSeverity.critical, CustomerSeverity.high, CustomerSeverity.medium},
+        ))
+        report.findings[-1].evidence.append(evidence)
+        existing_ids.add(finding_id)
 
 
 def _collect_screenshot_captures(report: CustomerReport) -> list[ScreenshotCaptureRecord]:
@@ -2950,6 +3003,7 @@ def _browser_finding(
     likely_frequency: str,
     recommendation: str,
     *,
+    confidence: float = 0.7,
     trust: bool = False,
     core: bool = False,
 ) -> CustomerFinding:
@@ -2961,7 +3015,7 @@ def _browser_finding(
         business_impact=business_impact,
         likely_frequency=likely_frequency,
         recommendation=recommendation,
-        confidence=0.7,
+        confidence=confidence,
         trust_blocker=trust,
         core_task_blocker=core,
     )

@@ -443,6 +443,12 @@ def _render_visual_review(report: CustomerReport) -> list[str]:
     ]
     lines.extend(f"- Heuristic: {item}" for item in review.heuristics)
     lines.extend(f"- Blocker: {item}" for item in review.blockers)
+    lines.extend(
+        f"- Visual finding: {finding.severity.value.upper()} — {finding.title}: "
+        f"{finding.customer_interpretation or finding.recommendation}"
+        for finding in review.visual_findings
+    )
+    lines.extend(f"- Vision action hint: {item}" for item in review.action_hints)
     return lines
 
 

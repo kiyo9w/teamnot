@@ -38,10 +38,16 @@ from teamnot.customer_loop.models import (
     SeededCustomerState,
     SeededLocalStorageEntry,
     SeededTestAccount,
+    VisionReviewArtifact,
+    VisualFinding,
 )
 from teamnot.customer_loop.orchestrator import default_customer_test_plan
 from teamnot.customer_loop.research_planning import suppress_repeated_noops
-from teamnot.customer_loop.runners import _path_for_windows_wrapper, _resolve_wrapper_path
+from teamnot.customer_loop.runners import (
+    _attach_visual_findings,
+    _path_for_windows_wrapper,
+    _resolve_wrapper_path,
+)
 
 
 def _profile() -> CustomerProfile:
@@ -434,6 +440,38 @@ def test_noop_action_memory_suppresses_repeated_actions():
     memory = [ResearchActionMemory(route="/", chosen_action="click-run", no_op=True)]
 
     assert suppress_repeated_noops("/", actions, memory) == [{"id": "click-settings"}]
+
+
+def test_model_vision_findings_feed_back_into_customer_report():
+    target = ExperienceTarget(url="https://example-product.test")
+    profile = CustomerProfile(persona="Ops buyer", role="operator")
+    report = CustomerReport(
+        profile=profile,
+        target=target,
+        plan=CustomerTestPlan(target=target, customer_job={"functional": "Evaluate product"}),
+        vision_review=VisionReviewArtifact(
+            review_kind="model_vision",
+            model_worker="codex_cli",
+            visual_findings=[
+                VisualFinding(
+                    title="Primary action is visually hidden",
+                    severity=CustomerSeverity.high,
+                    customer_interpretation="The buyer cannot tell where to begin.",
+                    recommendation="Raise the primary CTA above secondary navigation.",
+                    action_hint="try clicking the visible primary CTA",
+                    evidence_paths=["screenshots/first-impression.png"],
+                    confidence=0.81,
+                )
+            ],
+        ),
+    )
+
+    _attach_visual_findings(report)
+
+    assert report.findings[-1].id == "vision-primary-action-is-visually-hidden"
+    assert report.findings[-1].trust_blocker is True
+    assert report.findings[-1].evidence[0].kind == "model_vision"
+    assert report.findings[-1].evidence[0].metadata["action_hint"] == "try clicking the visible primary CTA"
 
 
 def test_openclaw_runner_surfaces_persona_research_gap_findings(tmp_path: Path):

@@ -251,13 +251,26 @@ class VisionScreenshotGroup(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class VisualFinding(BaseModel):
+    title: str = Field(min_length=1)
+    severity: CustomerSeverity = CustomerSeverity.medium
+    customer_interpretation: str = ""
+    recommendation: str = ""
+    action_hint: str = ""
+    evidence_paths: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+
+
 class VisionReviewArtifact(BaseModel):
     review_kind: str = "metadata_only"
     evidence_source: str = "screenshot metadata and hashes"
     screenshot_count: int = 0
+    model_worker: str = ""
     groups: list[VisionScreenshotGroup] = Field(default_factory=list)
     heuristics: list[str] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
+    visual_findings: list[VisualFinding] = Field(default_factory=list)
+    action_hints: list[str] = Field(default_factory=list)
     judgment_summary: str = "Deterministic baseline collected visual metadata only; no model visual judgment was performed."
 
 

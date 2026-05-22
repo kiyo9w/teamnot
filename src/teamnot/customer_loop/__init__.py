@@ -62,6 +62,7 @@ from teamnot.customer_loop.models import (
     SeededLocalStorageEntry,
     SeededTestAccount,
     VisionReviewArtifact,
+    VisualFinding,
 )
 from teamnot.customer_loop.orchestrator import (
     CustomerLoopOrchestrator,
@@ -78,7 +79,11 @@ from teamnot.customer_loop.runners import (
     OpenClawWindowsSessionRunner,
     PersistentWinBrowserCommandRunner,
 )
-from teamnot.customer_loop.vision import DeterministicScreenshotReviewer, VisionReviewer
+from teamnot.customer_loop.vision import (
+    CodexCliVisionReviewer,
+    DeterministicScreenshotReviewer,
+    VisionReviewer,
+)
 
 __all__ = [
     "CustomerEvidence",
@@ -101,6 +106,7 @@ __all__ = [
     "CustomerTestPlan",
     "CustomerTestTask",
     "BrowserRuntimeMetadata",
+    "CodexCliVisionReviewer",
     "DeterministicScreenshotReviewer",
     "DomainOutputOracle",
     "ExperienceRunner",
@@ -125,6 +131,7 @@ __all__ = [
     "SeededCustomerState",
     "SeededLocalStorageEntry",
     "SeededTestAccount",
+    "VisualFinding",
     "VisionReviewArtifact",
     "VisionReviewer",
     "default_customer_test_plan",
