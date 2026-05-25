@@ -5,24 +5,109 @@ import os from "node:os";
 import readline from "node:readline";
 import { createRequire } from "node:module";
 
-let chromium;
-try {
-  ({ chromium } = await import("playwright-core"));
-} catch (firstErr) {
+const PLAYWRIGHT_CORE_PACKAGE = process.env.TEAMNOT_PLAYWRIGHT_CORE_PACKAGE || "playwright-core@^1.57.0";
+
+async function loadPlaywrightCore() {
+  try {
+    return await import("playwright-core");
+  } catch (firstErr) {
+    return await loadPlaywrightCoreFallback(firstErr);
+  }
+}
+
+async function loadPlaywrightCoreFallback(firstErr) {
   const moduleBase = process.env.TEAMNOT_PLAYWRIGHT_REQUIRE_FROM
     || `file:///C:/Users/${os.userInfo().username}/OpenClawTools/browser-control.mjs`;
   try {
     const requireFromOpenClawTools = createRequire(moduleBase);
-    ({ chromium } = requireFromOpenClawTools("playwright-core"));
+    return requireFromOpenClawTools("playwright-core");
   } catch (fallbackErr) {
-    throw new Error(
-      "TeamNoT customer browser session requires playwright-core. "
-      + "Install it next to the TeamNoT runtime or set TEAMNOT_PLAYWRIGHT_REQUIRE_FROM "
-      + `to a JS file under an existing Node project. import error: ${firstErr?.message || firstErr}; `
-      + `fallback error: ${fallbackErr?.message || fallbackErr}`,
-    );
+    return await bootstrapPlaywrightCore(firstErr, fallbackErr);
   }
 }
+
+async function bootstrapPlaywrightCore(firstErr, fallbackErr) {
+  if (process.env.TEAMNOT_DISABLE_BROWSER_BOOTSTRAP) {
+    throw new Error(playwrightMissingMessage(firstErr, fallbackErr, "auto-bootstrap disabled"));
+  }
+  const runtimeDir = process.env.TEAMNOT_BROWSER_RUNTIME_DIR
+    || path.join(os.homedir(), ".cache", "teamnot", "browser-runtime");
+  await fs.mkdir(runtimeDir, { recursive: true });
+  const packageJson = path.join(runtimeDir, "package.json");
+  if (!await exists(packageJson)) {
+    await fs.writeFile(
+      packageJson,
+      JSON.stringify({ private: true, dependencies: {} }, null, 2) + "\n",
+      "utf8",
+    );
+  }
+  const install = await runProcess(npmCommand(), [
+    "install",
+    PLAYWRIGHT_CORE_PACKAGE,
+    "--no-audit",
+    "--no-fund",
+    "--silent",
+  ], runtimeDir, 120000);
+  if (install.code !== 0) {
+    throw new Error(playwrightMissingMessage(
+      firstErr,
+      fallbackErr,
+      `npm bootstrap failed in ${runtimeDir}: ${(install.stderr || install.stdout).slice(0, 1200)}`,
+    ));
+  }
+  const requireFromRuntime = createRequire(packageJson);
+  return requireFromRuntime("playwright-core");
+}
+
+function playwrightMissingMessage(firstErr, fallbackErr, finalReason) {
+  return "TeamNoT customer browser session requires playwright-core. "
+    + "TeamNoT tried direct import, OpenClawTools fallback, and user-level auto-bootstrap. "
+    + "Install Node/npm or set TEAMNOT_PLAYWRIGHT_REQUIRE_FROM / TEAMNOT_BROWSER_RUNTIME_DIR. "
+    + `direct import: ${firstErr?.message || firstErr}; `
+    + `fallback: ${fallbackErr?.message || fallbackErr}; `
+    + `final: ${finalReason}`;
+}
+
+function npmCommand() {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
+}
+
+async function exists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function runProcess(command, args, cwd, timeoutMs) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { cwd, shell: false });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      resolve({ code: 124, stdout, stderr: `${stderr}\nTimed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({ code: 127, stdout, stderr: String(err?.message || err) });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? 1, stdout, stderr });
+    });
+  });
+}
+
+const { chromium } = await loadPlaywrightCore();
 
 const args = process.argv.slice(2);
 const getArg = (name, fallback = "") => {
@@ -832,6 +917,14 @@ async function pGotoOrigin(origin) {
 
 async function handle(command) {
   const action = command.action || "status";
+  if (action === "close" && !rawMode) {
+    if (page && !page.isClosed()) await page.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
+    browser = null;
+    context = null;
+    page = null;
+    return { ok: true, action, cdp, sessionId };
+  }
   if (rawMode) {
     return await rawHandle(command);
   }

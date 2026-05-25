@@ -850,10 +850,30 @@ try {
             text=True,
             timeout=10,
         )
+        playwright_ok = rc.returncode == 0
+        playwright_detail = (rc.stdout or rc.stderr).strip()
+        if not playwright_ok:
+            npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
+            try:
+                npm_rc = subprocess.run(
+                    [npm_cmd, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                npm_ok = npm_rc.returncode == 0
+            except Exception:
+                npm_ok = False
+            if npm_ok:
+                playwright_ok = True
+                playwright_detail = (
+                    "playwright-core not installed yet; customer browser runtime will auto-bootstrap "
+                    f"it with {npm_cmd} into TEAMNOT_BROWSER_RUNTIME_DIR on first browser run"
+                )
         checks.append((
             "customer browser playwright-core",
-            rc.returncode == 0,
-            (rc.stdout or rc.stderr).strip(),
+            playwright_ok,
+            playwright_detail,
         ))
     cdp_url = os.environ.get("TEAMNOT_CDP_URL") or "http://127.0.0.1:18801"
     try:
