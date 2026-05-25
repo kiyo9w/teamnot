@@ -6,6 +6,7 @@ import os
 import re
 import select
 import subprocess
+import unicodedata
 from collections.abc import Callable, Sequence
 from hashlib import sha256
 from pathlib import Path
@@ -70,6 +71,7 @@ class PersistentWinBrowserCommandRunner:
             or "/mnt/c/Program Files/nodejs/node.exe"
         )
         self.cdp_url = cdp_url or os.environ.get("TEAMNOT_CDP_URL") or "http://127.0.0.1:18801"
+        self._explicit_cdp_url = bool(cdp_url or os.environ.get("TEAMNOT_CDP_URL"))
         self.script_path = Path(__file__).with_name("winbrowser_session.mjs")
         self._process: subprocess.Popen[str] | None = None
         self._counter = 0
@@ -103,15 +105,18 @@ class PersistentWinBrowserCommandRunner:
         if self._process and self._process.poll() is None:
             return self._process
         script = _path_for_windows_wrapper(self.script_path)
-        self._process = subprocess.Popen(
-            [
+        args = [
                 self.node_path,
                 script,
                 "--cdp",
                 self.cdp_url,
                 "--session-id",
                 f"teamnot-customer-{os.getpid()}",
-            ],
+        ]
+        if not self._explicit_cdp_url:
+            args.append("--cleanup-targets")
+        self._process = subprocess.Popen(
+            args,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -165,6 +170,12 @@ class PersistentWinBrowserCommandRunner:
             payload["loginUrl"] = _arg_value(args, "--login-url")
             payload["successUrl"] = _arg_value(args, "--success-url")
             payload["workspaceId"] = _arg_value(args, "--workspace-id")
+            payload["timeout"] = int(_arg_value(args, "--timeout", "30000") or "30000")
+        elif action == "assistLogin":
+            payload["url"] = _arg_value(args, "--url")
+            payload["loginUrl"] = _arg_value(args, "--login-url")
+            payload["successUrl"] = _arg_value(args, "--success-url")
+            payload["email"] = _arg_value(args, "--email")
             payload["timeout"] = int(_arg_value(args, "--timeout", "30000") or "30000")
         elif action == "viewport":
             payload["width"] = int(_arg_value(args, "--width", "390") or "390")
@@ -307,6 +318,8 @@ class OpenClawWindowsCDPRunner:
             )
             for finding in findings:
                 finding.evidence.append(evidence)
+            browser_runtime = _runtime_from_response(navigate)
+            _attach_screenshot_runtime(browser_runtime, screenshot_records)
             report = CustomerReport(
                 profile=profile,
                 target=target,
@@ -318,7 +331,7 @@ class OpenClawWindowsCDPRunner:
                     "Customer-testing-openclaw browser test completed with Windows CDP. "
                     f"{len(findings)} customer-impact finding(s) identified."
                 ),
-                browser_runtime=_runtime_from_response(navigate),
+                browser_runtime=browser_runtime,
                 screenshot_captures=screenshot_records,
                 vision_review=_review_screenshots(screenshot_records, target, profile),
             )
@@ -346,6 +359,10 @@ class OpenClawWindowsCDPRunner:
         args = ["--action", "screenshot", "--out", out or _path_for_windows_wrapper(path)]
         if full_page:
             args.append("--full-page")
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
         parsed: dict = {}
         failed = ""
         try:
@@ -727,7 +744,8 @@ class OpenClawWindowsSessionRunner(OpenClawWindowsCDPRunner):
             report.summary = (
                 "Customer-testing-openclaw session completed with fresh product exploration, "
                 "flow inspection, and real Windows CDP flow execution. "
-                f"{len(report.findings)} customer-impact finding(s) identified."
+                f"{_product_finding_count(report)} customer-impact finding(s) identified; "
+                f"{len(report.findings) - _product_finding_count(report)} TeamNoT coverage note(s) separated."
             )
             return report
         finally:
@@ -921,17 +939,35 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
         try:
             seeded_state = self._seeded_state_contract()
             seeded_state_result = self._apply_seeded_state(target, seeded_state) if seeded_state else None
+            browser_auth_result = self._attempt_browser_assisted_auth(target, seeded_state)
             exploration = _safe_explore_product(target, profile, self.wrapper_path, self.command_runner)
             planned_routes = routes_from_exploration(exploration, max_routes=9)
-            screen_exploration = self._explore_screens(target, planned_routes, out_dir)
-            research_brain = self._research_brain_pass(target, profile, planned_routes, out_dir, seeded_state)
+            research_brain = self._research_brain_pass(
+                target,
+                profile,
+                planned_routes,
+                out_dir,
+                seeded_state,
+                browser_auth_result=browser_auth_result,
+            )
             if seeded_state_result:
                 research_brain["seeded_state_application"] = seeded_state_result
+            research_brain["browser_assisted_auth"] = browser_auth_result
+            save_yaml(exploration, out_dir / "product_exploration.yaml")
+            save_yaml(research_brain, out_dir / "research_brain.yaml")
+            auth_blocker = _missing_required_auth_blocker(research_brain, seeded_state)
+            if auth_blocker:
+                raise CustomerLoopRunnerError(auth_blocker)
             routes_for_flow = _dedupe_strings([
                 *planned_routes,
-                *screen_exploration.get("routes_discovered", []),
                 *research_brain.get("routes_discovered", []),
             ])[:9]
+            screen_exploration = self._explore_screens(target, routes_for_flow, out_dir)
+            routes_for_flow = _dedupe_strings([
+                *routes_for_flow,
+                *screen_exploration.get("routes_discovered", []),
+            ])[:9]
+            save_yaml(screen_exploration, out_dir / "screen_exploration.yaml")
             inspected = _safe_inspect_customer_flow_pack(
                 target,
                 profile,
@@ -940,9 +976,6 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
                 self.command_runner,
             )
             runnable = make_flow_pack_runnable(inspected, file_fixture_path=self.file_fixture_path)
-            save_yaml(exploration, out_dir / "product_exploration.yaml")
-            save_yaml(screen_exploration, out_dir / "screen_exploration.yaml")
-            save_yaml(research_brain, out_dir / "research_brain.yaml")
             save_yaml(inspected, out_dir / "inspected_flow.yaml")
             save_yaml(runnable, out_dir / "runnable_flow.yaml")
 
@@ -974,6 +1007,11 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
                     finding.evidence.append(evidence)
                 report.findings.extend(findings)
             report.seeded_state = seeded_state
+            if not report.seeded_state and research_brain.get("seeded_state_status") == "browser_context":
+                report.seeded_state = SeededCustomerState(
+                    adapter_status="browser_context",
+                    cleanup_notes="Authenticated state was reused from the attached browser context.",
+                )
             report.action_memory = [
                 ResearchActionMemory.model_validate(item)
                 for item in research_brain.get("action_memory", [])
@@ -984,6 +1022,7 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
             report.vision_review = _review_screenshots(captures, target, profile)
             _attach_visual_findings(report)
             report.browser_runtime = _merge_runtime(report.browser_runtime, research_brain.get("browser_runtime"))
+            _reconcile_product_findings_from_research_depth(report)
             _attach_customer_panels(report)
             (out_dir / "flow_refinement_report.md").write_text(
                 render_flow_refinement_report(inspected, runnable, report),
@@ -992,7 +1031,8 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
             report.summary = (
                 "Customer-testing-openclaw researcher run completed with product exploration, "
                 "screen-level action evidence, form/adversarial branch testing, and real Windows CDP flow execution. "
-                f"{len(report.findings)} customer-impact finding(s) identified."
+                f"{_product_finding_count(report)} customer-impact finding(s) identified; "
+                f"{len(report.findings) - _product_finding_count(report)} TeamNoT coverage note(s) separated."
             )
             return report
         finally:
@@ -1006,6 +1046,7 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
         routes: list[str],
         out_dir: Path,
         seeded_state: SeededCustomerState | None = None,
+        browser_auth_result: dict | None = None,
     ) -> dict:
         screenshots = out_dir / "screenshots" / "research-brain"
         screenshots.mkdir(parents=True, exist_ok=True)
@@ -1016,6 +1057,7 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
         hypotheses = _research_hypotheses(profile)
         action_memory: list[ResearchActionMemory] = []
         browser_runtime: BrowserRuntimeMetadata | None = None
+        browser_auth_result = browser_auth_result or self._attempt_browser_assisted_auth(target, seeded_state)
         self._try_run(["--action", "viewport", "--width", "1280", "--height", "900"])
         for route_index, route in enumerate(routes[:6], start=1):
             if actions_used >= action_budget:
@@ -1130,9 +1172,15 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
             "seeded_state_path": str(self.seeded_state_path) if self.seeded_state_path else "",
             "state_policy": (
                 "seeded account/state available" if seeded_state else
+                "authenticated browser context reused" if _seed_result_applied(browser_auth_result) else
                 "no seeded account/state provided; authenticated product depth remains a coverage gap"
             ),
-            "seeded_state_status": seeded_state.adapter_status if seeded_state else "absent",
+            "seeded_state_status": (
+                seeded_state.adapter_status if seeded_state else
+                "browser_context" if _seed_result_applied(browser_auth_result) else
+                "absent"
+            ),
+            "browser_assisted_auth": browser_auth_result,
             "browser_runtime": browser_runtime.model_dump(mode="json") if browser_runtime else {},
             "action_memory": [item.model_dump(mode="json") for item in action_memory],
             "hypotheses": hypotheses,
@@ -1154,6 +1202,23 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
                 state.storage_state_path = (self.seeded_state_path.parent / state.storage_state_path).resolve()
             return state
         return None
+
+    def _attempt_browser_assisted_auth(
+        self,
+        target: ExperienceTarget,
+        seeded_state: SeededCustomerState | None,
+    ) -> dict:
+        if seeded_state and seeded_state.adapter_status == "applied":
+            return {"ok": True, "action": "assistLogin", "seededStateApplied": True, "reason": "seeded state already applied"}
+        account = seeded_state.test_account if seeded_state else None
+        args = [
+            "--action", "assistLogin",
+            "--url", str(target.url),
+            "--success-url", str(target.url),
+        ]
+        if account and account.email:
+            args.extend(["--email", account.email])
+        return self._try_seed_command(args)
 
     def _apply_seeded_state(self, target: ExperienceTarget, seeded_state: SeededCustomerState) -> dict:
         results: list[dict] = []
@@ -1212,6 +1277,9 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
         except subprocess.TimeoutExpired:
             return {"ok": False, "action": action, "unsupportedBlocker": f"adapter timed out during {action}"}
         if result.returncode != 0:
+            parsed = _parse_seed_stdout(result, action)
+            if parsed:
+                return parsed
             return {
                 "ok": False,
                 "action": action,
@@ -1274,6 +1342,17 @@ def _seed_result_applied(result: dict) -> bool:
     return False
 
 
+def _parse_seed_stdout(result: subprocess.CompletedProcess[str], action: str) -> dict:
+    try:
+        parsed = json.loads((result.stdout or "").strip() or "{}")
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {"ok": True, "action": action, "result": parsed}
+    parsed.setdefault("action", action)
+    return parsed
+
+
 def _runtime_from_response(response: dict | None) -> BrowserRuntimeMetadata:
     data = response or {}
     cdp = str(data.get("cdp", "") or data.get("cdpUrl", ""))
@@ -1311,11 +1390,29 @@ def _merge_runtime(current: BrowserRuntimeMetadata | None, response: dict | None
     return BrowserRuntimeMetadata.model_validate(data)
 
 
+def _attach_screenshot_runtime(
+    runtime: BrowserRuntimeMetadata,
+    screenshots: Sequence[ScreenshotCaptureRecord],
+) -> None:
+    for capture in screenshots:
+        if capture.method and not runtime.screenshot_method:
+            runtime.screenshot_method = capture.method
+        if capture.failed_primitive and not runtime.failed_primitive:
+            runtime.failed_primitive = capture.failed_primitive
+        if runtime.screenshot_method and runtime.failed_primitive:
+            return
+
+
 def _attach_customer_panels(report: CustomerReport) -> None:
-    if not report.persona_lenses:
-        report.persona_lenses = synthesize_persona_panel(report)
-    if report.jtbd_forces is None:
-        report.jtbd_forces = synthesize_jtbd_forces(report)
+    report.persona_lenses = synthesize_persona_panel(report)
+    report.jtbd_forces = synthesize_jtbd_forces(report)
+
+
+def _product_finding_count(report: CustomerReport) -> int:
+    return len([
+        finding for finding in report.findings
+        if not finding.id.startswith(("screen-exploration-", "research-brain-", "browser-runtime-"))
+    ])
 
 
 def _review_screenshots(
@@ -1363,6 +1460,113 @@ def _attach_visual_findings(report: CustomerReport) -> None:
         ))
         report.findings[-1].evidence.append(evidence)
         existing_ids.add(finding_id)
+
+
+def _reconcile_product_findings_from_research_depth(report: CustomerReport) -> None:
+    deep_text = _searchable_text(_observed_research_text(report))
+    if not deep_text:
+        return
+    suppress_ids: set[str] = set()
+    trust_terms = [*_TRUST_CUE_TERMS, *_profile_trust_terms(report.profile)]
+    if _contains_any(deep_text, trust_terms):
+        suppress_ids.add("missing-trust-copy")
+    if _contains_any(deep_text, _ADOPTION_CUE_TERMS):
+        suppress_ids.add("missing-adoption-cues")
+    if _contains_any(deep_text, _ACTIONABILITY_CUE_TERMS):
+        suppress_ids.add("weak-recommendation-clarity")
+    if not suppress_ids:
+        return
+    report.findings = [finding for finding in report.findings if finding.id not in suppress_ids]
+    report.scores = _score_customer_readiness({"failedResources": []}, report.findings)
+    for evidence in report.evidence:
+        if not evidence.raw_excerpt:
+            continue
+        raw = evidence.raw_excerpt
+        if "missing-trust-copy" in suppress_ids:
+            raw = raw.replace(
+                "STEP_FAIL|trust-copy|expected privacy/data/trust cues -> none detected",
+                "STEP_PASS|trust-copy|trust/safety cues found in observed route evidence",
+            )
+        if "missing-adoption-cues" in suppress_ids:
+            raw = raw.replace(
+                "STEP_FAIL|adoption-readiness|expected pricing/support/sample/demo/onboarding cues -> none detected",
+                "STEP_PASS|adoption-readiness|support/contact/onboarding cues found in observed route evidence",
+            )
+        if "weak-recommendation-clarity" in suppress_ids:
+            raw = raw.replace(
+                "STEP_FAIL|recommendation-clarity|expected share/export/team/client cues -> none detected",
+                "STEP_PASS|recommendation-clarity|action/share/output cues found in observed route evidence",
+            )
+        evidence.raw_excerpt = raw
+
+
+def _observed_research_text(report: CustomerReport) -> str:
+    parts: list[str] = []
+    for evidence in report.evidence:
+        metadata = evidence.metadata or {}
+        screen_exploration = metadata.get("screen_exploration")
+        if isinstance(screen_exploration, dict):
+            parts.append(_screen_exploration_observed_text(screen_exploration))
+        research_brain = metadata.get("research_brain")
+        if isinstance(research_brain, dict):
+            parts.append(_research_brain_observed_text(research_brain))
+    return " ".join(parts)
+
+
+def _screen_exploration_observed_text(screen_exploration: dict) -> str:
+    parts: list[str] = []
+    for route in screen_exploration.get("routes", []):
+        if not isinstance(route, dict):
+            continue
+        observation = route.get("observation")
+        if isinstance(observation, dict):
+            parts.extend(_observed_text_fields(observation))
+        for action in route.get("actions", []):
+            if not isinstance(action, dict):
+                continue
+            parts.extend(_observed_text_fields(action))
+            result = action.get("result")
+            if isinstance(result, dict):
+                parts.extend(_observed_text_fields(result))
+    return " ".join(parts)
+
+
+def _research_brain_observed_text(research_brain: dict) -> str:
+    parts: list[str] = []
+    for route in research_brain.get("routes", []):
+        if not isinstance(route, dict):
+            continue
+        observation = route.get("observation")
+        if isinstance(observation, dict):
+            parts.extend(_observed_text_fields(observation))
+        for action in route.get("actions", []):
+            if isinstance(action, dict):
+                parts.extend(_observed_text_fields(action))
+    return " ".join(parts)
+
+
+def _observed_text_fields(value: dict) -> list[str]:
+    fields = (
+        "bodyText",
+        "bodyTextSample",
+        "visibleText",
+        "text",
+        "beforeTextSample",
+        "afterTextSample",
+        "title",
+        "headings",
+        "buttons",
+        "links",
+        "primaryActionText",
+    )
+    parts: list[str] = []
+    for field in fields:
+        current = value.get(field)
+        if isinstance(current, str):
+            parts.append(current)
+        elif isinstance(current, list):
+            parts.extend(str(item) for item in current if isinstance(item, (str, int, float)))
+    return parts
 
 
 def _collect_screenshot_captures(report: CustomerReport) -> list[ScreenshotCaptureRecord]:
@@ -1586,6 +1790,8 @@ def _route_from_url(url: str, target: ExperienceTarget) -> str:
     parsed = urlparse(url)
     if parsed.scheme and parsed.netloc and parsed.netloc != parsed_target.netloc:
         return ""
+    if parsed.fragment.startswith("/"):
+        return parsed.fragment
     path = parsed.path or "/"
     return path if path.startswith("/") else f"/{path}"
 
@@ -1646,16 +1852,32 @@ def _rank_screen_actions(actions: list[dict]) -> list[dict]:
 def _screen_action_rank(action: dict) -> tuple[int, int, int, int]:
     text = str(action.get("text", "")).lower()
     selector = str(action.get("selector", "")).lower()
+    href = str(action.get("href", "")).lower()
     combined = f"{text} {selector}"
     primary_terms = (
         "get started", "start", "try", "demo", "create", "register", "sign up",
         "login", "log in", "continue", "submit", "save", "new", "add", "open",
-        "view", "details", "profile", "settings",
+        "view", "details", "profile", "settings", "dashboard", "account", "activity",
+        "search", "filter", "compare", "share", "export", "download", "approve",
+        "upload", "import", "connect", "invite", "contact", "book", "reserve",
+        "apply", "request", "message",
+        "chi tiết", "hồ sơ", "tài khoản", "của tôi", "phòng của tôi", "hoạt động",
+        "đăng", "góp ý", "liên hệ", "tải lên", "nhập", "kết nối", "mời",
+        "đặt", "ứng tuyển", "yêu cầu", "nhắn",
     )
     low_value_terms = (
         "skip", "menu", "github", "repo", "terms", "privacy", "cookie",
+        "tất cả",
     )
     primary_score = sum(2 for term in primary_terms if term in combined)
+    has_primary_intent = primary_score > 0
+    stateful_chip_penalty = -4 if (
+        not has_primary_intent
+        and not href
+        and str(action.get("tag", "")).lower() in {"button", "input"}
+        and len(text) <= 32
+        and len(text.split()) <= 4
+    ) else 0
     region_score = 3 if action.get("inMain") else 0
     if action.get("inNav") or action.get("inHeader"):
         region_score -= 1
@@ -1664,7 +1886,7 @@ def _screen_action_rank(action: dict) -> tuple[int, int, int, int]:
     low_value_penalty = -4 if any(term in combined for term in low_value_terms) else 0
     top = action.get("top")
     top_score = -abs(int(top)) if isinstance(top, int) else 0
-    return primary_score + region_score + low_value_penalty, len(text), top_score, -len(selector)
+    return primary_score + region_score + low_value_penalty + stateful_chip_penalty, len(text), top_score, -len(selector)
 
 
 def _screen_exploration_evidence(screen_exploration: dict) -> tuple[CustomerEvidence, list[CustomerFinding]]:
@@ -1767,7 +1989,8 @@ def _screen_exploration_evidence(screen_exploration: dict) -> tuple[CustomerEvid
             "Products or environments where CDP/eval/screenshot intermittently fails.",
             "Keep the loop alive, record failed actions as evidence, and retry or choose alternate branches.",
         ))
-    if len(screen_exploration.get("routes_discovered", [])) <= 1:
+    discovered_routes = set(screen_exploration.get("routes_discovered", []))
+    if len(discovered_routes) <= 1 and not changed_actions:
         findings.append(_browser_finding(
             "screen-exploration-entry-route-only",
             "Exploration did not escape the entry route",
@@ -1941,7 +2164,17 @@ def _research_brain_evidence(research_brain: dict) -> tuple[CustomerEvidence, li
             "Record the failed action, continue other branches, and retry with a more stable primitive or seeded state.",
             core=True,
         ))
-    if not filled_submit_actions:
+    has_form_surface = any(
+        route.get("observation", {}).get("forms")
+        for route in routes
+        if isinstance(route, dict) and isinstance(route.get("observation"), dict)
+    )
+    has_input_surface = any(
+        route.get("observation", {}).get("inputs")
+        for route in routes
+        if isinstance(route, dict) and isinstance(route.get("observation"), dict)
+    )
+    if not filled_submit_actions and (has_form_surface or has_input_surface):
         findings.append(_browser_finding(
             "research-brain-no-realistic-form-submit",
             "No realistic filled form submission was executed",
@@ -1953,7 +2186,8 @@ def _research_brain_evidence(research_brain: dict) -> tuple[CustomerEvidence, li
             core=True,
         ))
     seeded_status = str(research_brain.get("seeded_state_status", "absent"))
-    if seeded_status in {"absent", "unsupported"}:
+    auth_required = _research_brain_auth_gate_detected(research_brain)
+    if seeded_status in {"absent", "unsupported"} and auth_required:
         findings.append(_browser_finding(
             "research-brain-no-seeded-state",
             "No usable seeded account or state was available for authenticated depth",
@@ -1975,6 +2209,116 @@ def _research_brain_evidence(research_brain: dict) -> tuple[CustomerEvidence, li
             "Harden the Windows screenshot primitive or retry/fallback capture before marking visual evidence complete.",
         ))
     return evidence, findings
+
+
+def _missing_required_auth_blocker(
+    research_brain: dict,
+    seeded_state: SeededCustomerState | None,
+) -> str:
+    seeded_status = str(research_brain.get("seeded_state_status", "absent"))
+    if seeded_status in {"applied", "browser_context"}:
+        return ""
+    if seeded_state and seeded_state.adapter_status == "applied":
+        return ""
+    if not _research_brain_auth_gate_detected(research_brain):
+        return ""
+    cdp = ""
+    runtime = research_brain.get("browser_runtime")
+    if isinstance(runtime, dict):
+        cdp = str(runtime.get("cdp_url") or runtime.get("cdp") or "")
+    target_url = _first_auth_gate_url(research_brain)
+    return (
+        "Authentication is required before customer testing can continue. "
+        "Log in with a real or seeded test account in the browser context TeamNoT is attached to"
+        f"{f' ({cdp})' if cdp else ''}"
+        f"{f' and retry from {target_url}' if target_url else ''}. "
+        "TeamNoT stopped instead of producing a shallow pre-auth report."
+    )
+
+
+def _research_brain_auth_gate_detected(research_brain: dict) -> bool:
+    gate_terms = (
+        "login required", "log in required", "sign in required",
+        "please log in", "please sign in", "sign in to continue", "log in to continue",
+        "login to continue", "must be logged in", "requires an account",
+        "authentication required", "unauthorized", "forbidden",
+        "đăng nhập để", "vui lòng đăng nhập", "cần đăng nhập", "yêu cầu đăng nhập",
+        "đăng nhập trước", "phải đăng nhập",
+    )
+    for route in research_brain.get("routes", []):
+        if not isinstance(route, dict):
+            continue
+        route_text = " ".join([
+            str(route.get("route") or ""),
+            *_observed_text_fields(route.get("observation") or {}),
+        ])
+        if _contains_any(route_text, gate_terms) or _auth_route(str(route.get("route") or "")):
+            return True
+        for action in route.get("actions", []) if isinstance(route.get("actions"), list) else []:
+            if not isinstance(action, dict):
+                continue
+            result = action.get("result") if isinstance(action.get("result"), dict) else {}
+            action_text = " ".join([
+                str(action.get("summary") or ""),
+                *_observed_text_fields(action),
+                *_observed_text_fields(result),
+            ])
+            if _contains_any(action_text, gate_terms):
+                return True
+            after_url = str(result.get("afterUrl") or result.get("url") or "")
+            if _auth_route(after_url):
+                return True
+    return False
+
+
+def _first_auth_gate_url(research_brain: dict) -> str:
+    for route in research_brain.get("routes", []):
+        if not isinstance(route, dict):
+            continue
+        route_name = str(route.get("route") or "")
+        if _auth_route(route_name):
+            return route_name
+        for action in route.get("actions", []) if isinstance(route.get("actions"), list) else []:
+            if not isinstance(action, dict):
+                continue
+            result = action.get("result") if isinstance(action.get("result"), dict) else {}
+            after_url = str(result.get("afterUrl") or result.get("url") or "")
+            if _auth_route(after_url):
+                return after_url
+    return ""
+
+
+def _auth_route(url_or_path: str) -> bool:
+    value = url_or_path.lower()
+    return any(term in value for term in ("/login", "/log-in", "/signin", "/sign-in", "/auth"))
+
+
+def _research_brain_auth_required(research_brain: dict) -> bool:
+    text_parts: list[str] = []
+    for route in research_brain.get("routes", []):
+        if not isinstance(route, dict):
+            continue
+        observation = route.get("observation", {})
+        if isinstance(observation, dict):
+            text_parts.append(str(observation.get("bodyTextSample", "")))
+            for action in observation.get("actions", []) if isinstance(observation.get("actions"), list) else []:
+                if isinstance(action, dict):
+                    text_parts.append(str(action.get("text", "")))
+        for action in route.get("actions", []) if isinstance(route.get("actions"), list) else []:
+            if not isinstance(action, dict):
+                continue
+            result = action.get("result", {})
+            if isinstance(result, dict):
+                text_parts.extend([
+                    str(result.get("beforeTextSample", "")),
+                    str(result.get("afterTextSample", "")),
+                    str(result.get("summary", "")),
+                ])
+    combined = " ".join(text_parts).lower()
+    return _contains_any(combined, (
+        "login", "log in", "sign in", "auth", "account", "workspace",
+        "đăng nhập", "tài khoản",
+    ))
 
 
 def _research_action_expr(action: dict) -> str:
@@ -2342,6 +2686,8 @@ _CUSTOMER_PROBE_JS = r"""(() => {
       hasPrivacy: /privacy|secure|security|data|local|not stored|delete|client/.test(visibleText),
       hasSample: /sample|demo|example|try it|template/.test(visibleText),
       hasErrorRecovery: /error|invalid|required|try again|retry|fix|failed|missing/.test(visibleText),
+      hasTrustCue: /privacy|secure|security|data|verified|verification|trusted|safe|safety|report abuse|policy|permission|compliance|audit|encrypted|riêng tư|bảo mật|dữ liệu|an toàn|xác minh|chính sách|quyền/.test(visibleText),
+      hasOutcomeCue: /report|result|download|export|summary|next action|recommend|save|share|send|compare|contact|review|feedback|apply|approve|báo cáo|kết quả|tải|xuất|lưu|chia sẻ|gửi|liên hệ|đánh giá|phản hồi|duyệt/.test(visibleText),
       hasCollaboration: /share|export|download|send|client|team|approve/.test(visibleText),
     },
   };
@@ -2501,13 +2847,14 @@ _MOBILE_PROBE_JS = r"""(() => {
     .filter((item) => item.width > viewportWidth + 2 || item.left < -2 || item.right > viewportWidth + 2)
     .sort((a, b) => b.width - a.width)
     .slice(0, 8);
-  const overflow = documentWidth > viewportWidth + 2 || overflowOffenders.length > 0;
+  const hasDocumentOverflow = documentWidth > viewportWidth + 2;
   return {
     url: location.href,
     viewport: { width: innerWidth, height: innerHeight },
-    hasHorizontalOverflow: overflow,
+    hasHorizontalOverflow: hasDocumentOverflow,
     overflowWidth: documentWidth,
-    overflowOffenders,
+    overflowOffenders: hasDocumentOverflow ? overflowOffenders : [],
+    decorativeOverflowCandidates: hasDocumentOverflow ? [] : overflowOffenders,
     bodyTextLength: textOf(document.body).length,
     firstActions: Array.from(document.querySelectorAll("button,[role=button],input[type=submit],a[href]"))
       .slice(0, 8)
@@ -2580,7 +2927,7 @@ def _build_customer_findings(
     plan: CustomerTestPlan,
 ) -> tuple[list[str], list[CustomerFinding]]:
     text = str(probe.get("bodyText", ""))
-    lowered = text.lower()
+    lowered = _searchable_text(text)
     headings = [str(item) for item in probe.get("headings", [])]
     inputs = [item for item in probe.get("inputs", []) if isinstance(item, dict)]
     buttons = [str(item) for item in probe.get("buttons", [])]
@@ -2589,6 +2936,27 @@ def _build_customer_findings(
     mobile_probe = probe.get("mobileProbe", {}) if isinstance(probe.get("mobileProbe"), dict) else {}
     markers: list[str] = []
     findings: list[CustomerFinding] = []
+
+    unreachable_reason = _target_unreachable_reason(probe, target)
+    if unreachable_reason:
+        markers.append(f"STEP_FAIL|target-reachability|{unreachable_reason}")
+        markers.append(
+            "STEP_SKIP|product-ux-classification|"
+            "target did not load as the product, so generic UX findings are suppressed"
+        )
+        findings.append(_browser_finding(
+            "target-unreachable",
+            "Target product could not be reached",
+            CustomerSeverity.high,
+            "The customer never reaches the product experience, so this run cannot judge the app's actual UX.",
+            "Customer Loop would otherwise risk misclassifying a network/site-protection failure as product usability defects.",
+            "Every run where the target lands on a browser error page or non-product interstitial.",
+            "Classify this run as target_unreachable/site_protected/auth_required first, then retry with a reachable target or seeded state before filing product UX bugs.",
+            trust=True,
+            core=True,
+        ))
+        findings.extend(_build_research_gap_findings(profile, plan))
+        return markers, findings
 
     if headings or text:
         markers.append(
@@ -2612,6 +2980,7 @@ def _build_customer_findings(
     promise_terms = (
         "problem", "pain", "save", "risk", "prevent", "avoid", "mistake", "workflow",
         "for teams", "for agencies", "customer", "operator", "buyer",
+        *_domain_terms(profile, target, plan),
     )
     if _contains_any(lowered, promise_terms):
         markers.append("STEP_PASS|customer-promise|page explains a customer problem, audience, or promised outcome")
@@ -2651,10 +3020,10 @@ def _build_customer_findings(
             "missing-error-recovery-cues",
             "Mistake recovery is not visible before use",
             CustomerSeverity.medium,
-            "The customer cannot tell what happens if they upload the wrong file, omit data, or hit a failure.",
-            "Real operators hesitate to try the product with messy production data.",
-            "Likely in every evaluation before the first risky action.",
-            "Show concise validation/retry guidance, accepted input examples, and whether user work is preserved.",
+            "The customer cannot tell what happens after a wrong choice, invalid input, empty result, failed contact step, or other risky action.",
+            "Customers hesitate to proceed when recovery, reset, and next-step guidance are unclear.",
+            "Likely in every evaluation before the first irreversible or high-effort action.",
+            "Show concise retry/reset guidance, empty-state next steps, and whether the customer's context is preserved.",
         ))
 
     unnamed_controls = [
@@ -2680,7 +3049,7 @@ def _build_customer_findings(
     else:
         markers.append("STEP_PASS|accessibility-basics|interactive controls have basic names or labels")
 
-    if semantic.get("hasPrivacy"):
+    if semantic.get("hasPrivacy") or semantic.get("hasTrustCue") or _contains_any(lowered, _TRUST_CUE_TERMS):
         markers.append("STEP_PASS|trust-copy|page includes at least one data/privacy/trust cue")
     else:
         markers.append("STEP_FAIL|trust-copy|expected privacy/data/trust cues -> none detected")
@@ -2688,15 +3057,21 @@ def _build_customer_findings(
             "missing-trust-copy",
             "No visible trust or data-handling explanation",
             CustomerSeverity.medium,
-            f"{profile.persona} must decide whether it is safe to use real work data.",
-            "The product may be functionally usable but blocked from adoption with real customer data.",
-            "Every buyer or operator before first real upload.",
-            "Add concise privacy/data-handling copy near the primary workflow and report output.",
+            f"{profile.persona} must decide whether the product is safe enough for the stated trust threshold: {profile.trust_threshold or 'real customer usage'}.",
+            "The product may be functionally usable but still blocked by safety, source, privacy, money, or decision-risk concerns.",
+            "Every serious evaluator before they share personal information, act on a result, pay, or rely on the product.",
+            "Add concise trust proof near the primary workflow: source/verification, privacy or data handling, risk boundaries, and support/escalation path.",
             trust=True,
         ))
 
-    output_terms = ("report", "result", "download", "export", "summary", "next action", "recommend")
-    if _contains_any(lowered, output_terms):
+    output_terms = (
+        "report", "result", "download", "export", "summary", "next action", "recommend",
+        "save", "share", "send", "compare", "contact", "review", "feedback", "apply", "approve",
+        "price", "fee", "location", "address", "verified", "phone", "appointment", "booking",
+        "báo cáo", "kết quả", "tải", "xuất", "lưu", "chia sẻ", "gửi", "liên hệ", "đánh giá", "phản hồi",
+        "giá", "phí", "địa chỉ", "xác minh", "số điện thoại", "đặt lịch", "hẹn",
+    )
+    if semantic.get("hasOutcomeCue") or _contains_any(lowered, output_terms):
         markers.append("STEP_PASS|output-actionability|page contains output/report/actionability language")
     else:
         markers.append("STEP_FAIL|output-actionability|expected report/result/next-action language -> none detected")
@@ -2704,10 +3079,10 @@ def _build_customer_findings(
             "unclear-output-value",
             "Output value is not clear before use",
             CustomerSeverity.low,
-            "The customer may not know what useful artifact they will receive after completing the workflow.",
+            "The customer may not know what decision, result, saved state, contact path, or next action they will get after completing the workflow.",
             "Lower confidence and conversion before the first run.",
             "Every evaluation session.",
-            "Preview the kind of report, result, or next action the customer will receive.",
+            "Preview the kind of result, decision data, saved item, contact path, or next action the customer will receive.",
         ))
 
     if semantic.get("hasPricing") or semantic.get("hasSupport") or semantic.get("hasSample"):
@@ -2862,6 +3237,43 @@ def _build_customer_findings(
     return markers, findings
 
 
+_TRUST_CUE_TERMS = (
+    "privacy", "secure", "security", "data", "not stored", "delete", "client",
+    "verified", "verification", "trusted", "safe", "safety", "report abuse",
+    "policy", "permission", "compliance", "audit", "encrypted", "retention",
+    "riêng tư", "bảo mật", "dữ liệu", "an toàn", "xác minh", "chính sách", "quyền",
+    "nguồn", "xác thực", "chống lừa đảo", "cảnh báo", "bảo vệ",
+)
+_ADOPTION_CUE_TERMS = (
+    "pricing", "price", "plan", "trial", "pilot", "quote", "book", "demo",
+    "sample", "support", "contact", "help", "docs", "email", "chat", "faq",
+    "onboarding", "sales", "learn more", "get started",
+    "giá", "gói", "dùng thử", "demo", "mẫu", "hỗ trợ", "liên hệ", "trợ giúp",
+    "tài liệu", "email", "chat", "câu hỏi thường gặp", "bắt đầu",
+)
+_ACTIONABILITY_CUE_TERMS = (
+    "share", "export", "download", "send", "client", "team", "approve", "save",
+    "copy", "link", "report", "result", "summary", "next action", "recommend",
+    "compare", "contact", "review", "feedback",
+    "chia sẻ", "xuất", "tải", "gửi", "khách hàng", "đội", "duyệt", "lưu",
+    "sao chép", "liên kết", "báo cáo", "kết quả", "tóm tắt", "đề xuất",
+    "so sánh", "liên hệ", "đánh giá", "phản hồi",
+)
+
+
+def _profile_trust_terms(profile: CustomerProfile) -> list[str]:
+    source = " ".join(str(value or "") for value in (profile.trust_threshold, profile.buyer_user_split))
+    stop = {
+        "the", "and", "for", "with", "that", "this", "must", "need", "needs",
+        "proof", "real", "work", "data", "before", "after", "from", "their",
+    }
+    terms: list[str] = []
+    for raw in re.findall(r"[A-Za-z][A-Za-z0-9_-]{4,}", source.lower()):
+        if raw not in stop and raw not in terms:
+            terms.append(raw)
+    return terms[:8]
+
+
 def _build_research_gap_findings(profile: CustomerProfile, plan: CustomerTestPlan) -> list[CustomerFinding]:
     findings: list[CustomerFinding] = []
     if profile.trust_threshold:
@@ -2870,8 +3282,8 @@ def _build_research_gap_findings(profile: CustomerProfile, plan: CustomerTestPla
             "Stated trust threshold is not proven end-to-end",
             CustomerSeverity.low,
             f"{profile.persona} needs proof for: {profile.trust_threshold}. This run can only check visible cues.",
-            "A team may like the product but still refuse to try it on real work until the trust proof is explicit.",
-            "Every serious evaluation where data, repositories, permissions, or buyer approval matter.",
+            "A customer may like the product but still refuse to rely on it until the trust proof is explicit.",
+            "Every serious evaluation where personal information, money, permissions, safety, or buyer approval matter.",
             "Add or test a dedicated trust path that proves the threshold with concrete docs, examples, policy, or workflow evidence.",
             trust=True,
         ))
@@ -2899,8 +3311,55 @@ def _build_research_gap_findings(profile: CustomerProfile, plan: CustomerTestPla
     return findings
 
 
+def _target_unreachable_reason(probe: dict, target: ExperienceTarget) -> str:
+    url = str(probe.get("url", "") or "")
+    title = str(probe.get("title", "") or "")
+    body = str(probe.get("bodyText", "") or "").lower()
+    if url.startswith("chrome-error://"):
+        return f"browser error page reached instead of target; final_url={url}; title={title or target.url}"
+    error_terms = (
+        "this site can't be reached",
+        "this site can’t be reached",
+        "dns_probe",
+        "err_name_not_resolved",
+        "err_connection",
+        "err_timed_out",
+        "err_ssl",
+    )
+    if any(term in body for term in error_terms):
+        return f"browser/network error text detected at final_url={url or target.url}"
+    parsed_target = urlparse(str(target.url))
+    parsed_final = urlparse(url)
+    if parsed_final.scheme in {"http", "https"} and parsed_target.netloc and parsed_final.netloc:
+        final_path = parsed_final.path.lower()
+        target_path = parsed_target.path.lower()
+        auth_path = any(term in final_path for term in ("/login", "/log-in", "/signin", "/sign-in", "/auth"))
+        if auth_path and final_path != target_path:
+            return f"target redirected to login before product access; final_url={url}"
+    return ""
+
+
 def _contains_any(text: str, terms: Sequence[str]) -> bool:
-    return any(term in text for term in terms)
+    lowered = text.lower()
+    folded = _ascii_fold(lowered)
+    return any(
+        term
+        and (str(term).lower() in lowered or _ascii_fold(str(term).lower()) in folded)
+        for term in terms
+    )
+
+
+def _searchable_text(text: str) -> str:
+    lowered = str(text).lower()
+    folded = _ascii_fold(lowered)
+    return f"{lowered} {folded}" if folded != lowered else lowered
+
+
+def _ascii_fold(text: str) -> str:
+    return "".join(
+        char for char in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(char)
+    )
 
 
 def _mobile_overflow_detail(mobile_probe: dict) -> str:
@@ -2974,8 +3433,13 @@ def _score_customer_readiness(probe: dict, findings: list[CustomerFinding]) -> C
     return CustomerScores(
         job_importance=8,
         value=score(8, {"unclear-customer-promise", "weak-domain-fit", "unclear-output-value"}),
-        time_to_value=score(8, {"slow-time-to-value", "missing-core-workflow"}),
-        task_success=score(8, {"missing-core-workflow", "first-impression-empty", "missing-error-recovery-cues"}),
+        time_to_value=score(8, {"slow-time-to-value", "missing-core-workflow", "target-unreachable"}),
+        task_success=score(8, {
+            "missing-core-workflow",
+            "first-impression-empty",
+            "missing-error-recovery-cues",
+            "target-unreachable",
+        }),
         usability=score(8, {"unlabeled-controls", "horizontal-overflow", "mobile-review-overflow"}),
         trust_readiness=score(8, {
             "missing-trust-copy",
@@ -3003,6 +3467,7 @@ def _score_customer_readiness(probe: dict, findings: list[CustomerFinding]) -> C
             "missing-error-recovery-cues",
             "resource-health",
             "switching-forces-not-validated",
+            "target-unreachable",
         }),
         technical_reliability=max(1, min(10, reliability_base - (1 if "resource-health" in ids else 0))),
     )

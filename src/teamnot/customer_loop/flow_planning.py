@@ -722,7 +722,9 @@ def _domain_terms_from_profile(profile: CustomerProfile, target: ExperienceTarge
 
 def _best_action(actions: list[dict]) -> dict | None:
     ranked = sorted(actions, key=_action_rank, reverse=True)
-    return ranked[0] if ranked else None
+    if not ranked:
+        return None
+    return ranked[0] if _action_rank(ranked[0])[0] > 0 else None
 
 
 def _action_rank(action: dict) -> tuple[int, int, int, int]:
@@ -732,9 +734,13 @@ def _action_rank(action: dict) -> tuple[int, int, int, int]:
     first_value_terms = (
         "run", "start", "create", "submit", "generate", "analyze", "analyse",
         "preflight", "upload", "continue", "try", "register", "sign up", "log in", "login",
+        "apply", "request", "book", "reserve", "next", "done", "finish", "new",
     )
     secondary_terms = (
         "import", "save", "send", "invite", "explore", "contact", "claim", "install",
+        "detail", "details", "profile", "account", "activity", "message", "connect",
+        "chi tiết", "hồ sơ", "tài khoản", "liên hệ", "hoạt động", "đăng", "nhắn",
+        "đặt", "ứng tuyển", "yêu cầu",
     )
     output_terms = (
         "download", "export",
@@ -744,23 +750,37 @@ def _action_rank(action: dict) -> tuple[int, int, int, int]:
         "developers", "company", "foundation", "how it works", "pricing",
         "docs", "privacy", "terms", "learn",
     )
-    if any(term in text for term in first_value_terms):
+    if any(_contains_action_term(text, term) for term in first_value_terms):
         intent_score = 4
-    elif any(term in text for term in secondary_terms):
+    elif any(_contains_action_term(text, term) for term in secondary_terms):
         intent_score = 2
-    elif any(term in text for term in output_terms):
+    elif any(_contains_action_term(text, term) for term in output_terms):
         intent_score = 1
     else:
         intent_score = 0
+    has_href = bool(str(action.get("href", "")).strip())
+    stateful_chip_penalty = -4 if (
+        intent_score == 0
+        and not has_href
+        and tag in {"button", "input"}
+        and len(str(action.get("text", "")).strip()) <= 32
+        and len(str(action.get("text", "")).strip().split()) <= 4
+    ) else 0
+    route_change_score = 1 if has_href else 0
     button_score = 1 if tag == "button" or "submit" in selector or "button" in selector else 0
-    nav_penalty = -2 if any(term in text for term in nav_terms) else 0
+    nav_penalty = -2 if any(_contains_action_term(text, term) for term in nav_terms) else 0
     page_region_score = 3 if action.get("inMain") else 0
     if action.get("inFooter"):
         page_region_score -= 4
     if action.get("inHeader") or action.get("inNav"):
         page_region_score -= 2
     enabled_score = -2 if action.get("disabled") else 0
-    return intent_score + nav_penalty + page_region_score + enabled_score, button_score, -len(text), len(text)
+    return (
+        intent_score + nav_penalty + page_region_score + enabled_score + stateful_chip_penalty + route_change_score,
+        button_score,
+        -len(text),
+        len(text),
+    )
 
 
 def _route_candidate_rank(candidate: dict, profile: CustomerProfile, target: ExperienceTarget) -> tuple[int, int, int, int]:
@@ -1032,6 +1052,13 @@ def _exploration_gaps(
 
 def _contains_route_term(text: str, terms: tuple[str, ...]) -> bool:
     return any(term in text for term in terms)
+
+
+def _contains_action_term(text: str, term: str) -> bool:
+    if term.isascii() and re.fullmatch(r"[a-z0-9 -]+", term):
+        pattern = rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])"
+        return re.search(pattern, text) is not None
+    return term in text
 
 
 def _first(items) -> dict | str | None:

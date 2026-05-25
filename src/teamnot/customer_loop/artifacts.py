@@ -44,11 +44,13 @@ def render_customer_report(report: CustomerReport) -> str:
         "## Research Lens",
         *_render_research_lens(report),
         "",
-        "## Findings",
+        "## Customer Findings",
     ]
-    if not report.findings:
+    customer_findings = _customer_findings(report)
+    coverage_findings = _coverage_findings(report)
+    if not customer_findings:
         lines.append("No customer-impact findings were identified.")
-    for finding in report.findings:
+    for finding in customer_findings:
         lines.extend([
             "",
             f"### {finding.severity.value.upper()}: {finding.title}",
@@ -59,6 +61,22 @@ def render_customer_report(report: CustomerReport) -> str:
             _render_field("Recommendation", finding.recommendation),
             f"- Confidence: {finding.confidence:.2f}",
         ])
+    if coverage_findings:
+        lines.extend([
+            "",
+            "## TeamNoT Coverage Notes",
+            "These are test-run limitations, not product bugs. They are kept separate so the customer report does not turn into a self-review.",
+        ])
+        for finding in coverage_findings:
+            lines.extend([
+                "",
+                f"### {finding.severity.value.upper()}: {finding.title}",
+                "",
+                _render_field("Observed limitation", finding.customer_interpretation),
+                _render_field("Coverage impact", finding.business_impact),
+                _render_field("Recommendation", finding.recommendation),
+                f"- Confidence: {finding.confidence:.2f}",
+            ])
     lines.extend([
         "",
         "## Customer Journey Notes",
@@ -132,6 +150,25 @@ def render_customer_report(report: CustomerReport) -> str:
         if item.raw_excerpt:
             lines.extend(["", "```text", item.raw_excerpt.strip(), "```"])
     return "\n".join(lines).strip() + "\n"
+
+
+_COVERAGE_FINDING_PREFIXES = (
+    "screen-exploration-",
+    "research-brain-",
+    "browser-runtime-",
+)
+
+
+def _is_coverage_finding_id(finding_id: str) -> bool:
+    return finding_id.startswith(_COVERAGE_FINDING_PREFIXES)
+
+
+def _customer_findings(report: CustomerReport):
+    return [finding for finding in report.findings if not _is_coverage_finding_id(finding.id)]
+
+
+def _coverage_findings(report: CustomerReport):
+    return [finding for finding in report.findings if _is_coverage_finding_id(finding.id)]
 
 
 def _render_method(report: CustomerReport) -> list[str]:
@@ -244,7 +281,7 @@ def _render_customer_objections(report: CustomerReport) -> list[str]:
     if profile.alternatives:
         objections.append(f"- Why switch from {', '.join(profile.alternatives[:3])}?")
     if any(finding.trust_blocker for finding in report.findings):
-        objections.append("- Can I trust this with real production data?")
+        objections.append("- Can I trust this enough to use it in my real decision context?")
     if any(finding.core_task_blocker for finding in report.findings):
         objections.append("- Can I complete the core workflow without expert help?")
     if "STEP_SKIP|jtbd-forces" in raw:
@@ -624,7 +661,7 @@ def _customer_testing_skill_coverage(report: CustomerReport) -> list[dict[str, s
         entry("emotional-confidence", "covered" if has_text("emotional", "confidence", "anxiety", "feel safer") else "partial", "customer anxiety/confidence was evaluated."),
         entry("recommendation-clarity", "covered" if any(finding.recommendation for finding in report.findings) else "gap", "findings include concrete next recommendations."),
         entry("model-vision", visual_status, f"vision review kind: {report.vision_review.review_kind if report.vision_review else 'none'}."),
-        entry("seeded-auth-depth", "covered" if seeded_status == "applied" else "gap", f"seeded state status: {seeded_status}."),
+        entry("seeded-auth-depth", "covered" if seeded_status in {"applied", "browser_context"} else "gap", f"seeded state status: {seeded_status}."),
     ]
 
 
@@ -701,7 +738,7 @@ def write_report_artifacts(
     out = ensure_artifact_dirs(out_dir)
     save_yaml(profile, out / "customer_profile.yaml")
     save_yaml(plan, out / "customer_test_plan.yaml")
-    save_json(report, out / "customer_report.json")
+    save_json(_redacted_report_payload(report), out / "customer_report.json")
     if report.seeded_state:
         save_yaml(report.seeded_state.redacted(), out / "seeded_state_metadata.yaml")
     if report.browser_runtime:
@@ -725,6 +762,13 @@ def write_report_artifacts(
     save_yaml({"coverage": _customer_testing_skill_coverage(report)}, out / "customer_testing_skill_coverage.yaml")
     (out / "customer_report.md").write_text(render_customer_report(report), encoding="utf-8")
     return out
+
+
+def _redacted_report_payload(report: CustomerReport) -> dict:
+    payload = report.model_dump(mode="json")
+    if report.seeded_state:
+        payload["seeded_state"] = report.seeded_state.redacted()
+    return payload
 
 
 def write_generated_brief(out_dir: str | Path, generated: GeneratedBrief) -> Path:

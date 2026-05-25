@@ -1,6 +1,7 @@
 """Deterministic planner helpers for autonomous customer research."""
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 
 from teamnot.customer_loop.models import (
@@ -16,10 +17,17 @@ from teamnot.customer_loop.models import (
 PRODUCT_TERMS = (
     "run", "start", "create", "submit", "generate", "analyze", "analyse",
     "upload", "invite", "settings", "billing", "dashboard", "report", "save",
+    "detail", "details", "contact", "review", "feedback", "login", "post",
+    "search", "filter", "compare", "share", "export", "download", "continue",
+    "try", "demo", "sample", "onboard", "connect", "approve", "profile",
+    "account", "activity", "apply", "request", "message", "book", "reserve",
+    "chi tiết", "hồ sơ", "tài khoản", "liên hệ", "hoạt động", "đăng", "nhắn",
+    "đặt", "ứng tuyển", "yêu cầu",
 )
 LOW_VALUE_TERMS = (
     "footer", "privacy", "terms", "docs", "blog", "github", "menu",
     "navigation", "devtools", "home",
+    "all", "language", "theme", "cookie", "status", "changelog",
 )
 
 
@@ -29,10 +37,27 @@ def rank_customer_actions(actions: Iterable[dict]) -> list[dict]:
 
 def customer_action_score(action: dict) -> tuple[int, int, str]:
     text = " ".join(str(action.get(key, "")) for key in ("text", "selector", "id", "kind")).lower()
-    product = sum(1 for term in PRODUCT_TERMS if term in text)
-    low_value = sum(1 for term in LOW_VALUE_TERMS if term in text)
+    product = sum(1 for term in PRODUCT_TERMS if _contains_action_term(text, term))
+    low_value = sum(1 for term in LOW_VALUE_TERMS if _contains_action_term(text, term))
     main = 1 if action.get("inMain") or action.get("kind") in {"filled_submit", "empty_submit"} else 0
-    return (product * 3 + main - low_value * 4, len(text), text)
+    label = str(action.get("text", "")).strip()
+    has_href = bool(str(action.get("href", "")).strip())
+    stateful_chip = (
+        product == 0
+        and not has_href
+        and str(action.get("tag", "")).lower() in {"button", "input"}
+        and len(label) <= 32
+        and len(label.split()) <= 4
+    )
+    stateful_penalty = 4 if stateful_chip else 0
+    return (product * 3 + main - low_value * 4 - stateful_penalty, len(text), text)
+
+
+def _contains_action_term(text: str, term: str) -> bool:
+    if term.isascii() and re.fullmatch(r"[a-z0-9 -]+", term):
+        pattern = rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])"
+        return re.search(pattern, text) is not None
+    return term in text
 
 
 def suppress_repeated_noops(

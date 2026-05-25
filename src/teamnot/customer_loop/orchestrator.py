@@ -220,10 +220,10 @@ def default_customer_test_plan(config: CustomerLoopConfig):
         customer_job=CustomerJob(
             functional=(
                 f"Complete the product's core workflow at {config.target.url} and decide "
-                "whether it solves the customer problem without developer help."
+                "whether it solves the customer problem without expert help."
             ),
-            emotional="Feel safer and more confident after using the product in real work.",
-            social="Be able to justify the result to a teammate, manager, client, or buyer.",
+            emotional="Feel safer and more confident after using the product in a realistic situation.",
+            social="Be able to justify the result to another person involved in the decision.",
             importance=8,
         ),
         tasks=[
@@ -241,8 +241,8 @@ def default_customer_test_plan(config: CustomerLoopConfig):
             ),
             CustomerTestTask(
                 id="output-actionability",
-                title="Evaluate the result as a decision artifact",
-                instructions="Check whether the output is specific, prioritized, explainable, exportable, and usable by a real operator.",
+                title="Evaluate whether the result is actionable",
+                instructions="Check whether the output, saved state, recommendation, contact path, or next action is specific, explainable, and usable.",
                 success_criteria=["The customer can act on the output and explain it to someone else."],
             ),
             CustomerTestTask(
@@ -255,7 +255,7 @@ def default_customer_test_plan(config: CustomerLoopConfig):
                 id="trust-adoption",
                 title="Assess trust, risk, and adoption blockers",
                 instructions="Check data handling, privacy, proof, onboarding, support, pricing/packaging, domain fit, and buyer objections.",
-                success_criteria=["A buyer or operator has enough confidence to try this with real work data."],
+                success_criteria=["The target customer has enough confidence to try this in their real decision context."],
             ),
             CustomerTestTask(
                 id="mobile-accessibility-reliability",
