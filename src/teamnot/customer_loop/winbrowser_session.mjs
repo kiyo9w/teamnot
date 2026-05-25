@@ -8,11 +8,20 @@ import { createRequire } from "node:module";
 let chromium;
 try {
   ({ chromium } = await import("playwright-core"));
-} catch {
+} catch (firstErr) {
   const moduleBase = process.env.TEAMNOT_PLAYWRIGHT_REQUIRE_FROM
     || `file:///C:/Users/${os.userInfo().username}/OpenClawTools/browser-control.mjs`;
-  const requireFromOpenClawTools = createRequire(moduleBase);
-  ({ chromium } = requireFromOpenClawTools("playwright-core"));
+  try {
+    const requireFromOpenClawTools = createRequire(moduleBase);
+    ({ chromium } = requireFromOpenClawTools("playwright-core"));
+  } catch (fallbackErr) {
+    throw new Error(
+      "TeamNoT customer browser session requires playwright-core. "
+      + "Install it next to the TeamNoT runtime or set TEAMNOT_PLAYWRIGHT_REQUIRE_FROM "
+      + `to a JS file under an existing Node project. import error: ${firstErr?.message || firstErr}; `
+      + `fallback error: ${fallbackErr?.message || fallbackErr}`,
+    );
+  }
 }
 
 const args = process.argv.slice(2);
@@ -60,9 +69,22 @@ async function probeCdp() {
 }
 
 function browserExe() {
-  if (browserName === "brave") return "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
-  if (browserName === "edge") return "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe";
-  return "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+  if (process.env.TEAMNOT_BROWSER_EXE) return process.env.TEAMNOT_BROWSER_EXE;
+  const platform = process.platform;
+  if (platform === "win32") {
+    if (browserName === "brave") return "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
+    if (browserName === "edge") return "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe";
+    return "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+  }
+  if (platform === "darwin") {
+    if (browserName === "brave") return "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
+    if (browserName === "edge") return "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge";
+    return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  }
+  if (browserName === "brave") return "brave-browser";
+  if (browserName === "edge") return "microsoft-edge";
+  if (browserName === "chromium") return "chromium";
+  return "google-chrome";
 }
 
 function cdpPort() {
@@ -84,7 +106,8 @@ function profileDirForReport(ensured) {
 
 async function startBrowser() {
   await fs.mkdir(userDataDir, { recursive: true });
-  const child = spawn(browserExe(), [
+  const executable = browserExe();
+  const child = spawn(executable, [
     "--remote-debugging-address=127.0.0.1",
     `--remote-debugging-port=${cdpPort()}`,
     `--user-data-dir=${userDataDir}`,
@@ -92,6 +115,12 @@ async function startBrowser() {
     "--no-default-browser-check",
     "about:blank",
   ], { detached: true, stdio: "ignore" });
+  await new Promise((resolve, reject) => {
+    child.once("error", (err) => {
+      reject(new Error(`Could not start browser executable "${executable}". Set TEAMNOT_BROWSER_EXE or install Chrome/Edge/Brave. ${String(err?.message || err)}`));
+    });
+    setTimeout(resolve, 0);
+  });
   child.unref();
   return { pid: child.pid, userDataDir };
 }

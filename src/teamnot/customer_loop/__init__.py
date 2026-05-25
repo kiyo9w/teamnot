@@ -78,6 +78,7 @@ from teamnot.customer_loop.runners import (
     OpenClawWindowsResearcherRunner,
     OpenClawWindowsSessionRunner,
     PersistentWinBrowserCommandRunner,
+    detect_customer_browser_node,
 )
 from teamnot.customer_loop.vision import (
     CodexCliVisionReviewer,
@@ -135,6 +136,7 @@ __all__ = [
     "VisionReviewArtifact",
     "VisionReviewer",
     "default_customer_test_plan",
+    "detect_customer_browser_node",
     "discover_customer_routes",
     "explore_product",
     "ensure_artifact_dirs",
