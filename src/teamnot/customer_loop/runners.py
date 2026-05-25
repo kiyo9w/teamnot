@@ -5,6 +5,7 @@ import json
 import os
 import re
 import select
+import shutil
 import subprocess
 import unicodedata
 from collections.abc import Callable, Sequence
@@ -56,6 +57,21 @@ from teamnot.customer_loop.vision import reviewer_from_environment
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
 
+def detect_customer_browser_node() -> str:
+    """Return the Node executable TeamNoT should use for packaged browser sessions."""
+    explicit = (
+        os.environ.get("TEAMNOT_WINDOWS_NODE")
+        or os.environ.get("TEAMNOT_NODE")
+        or os.environ.get("NODE")
+    )
+    if explicit:
+        return explicit
+    wsl_windows_node = Path("/mnt/c/Program Files/nodejs/node.exe")
+    if wsl_windows_node.exists():
+        return str(wsl_windows_node)
+    return shutil.which("node") or "node"
+
+
 class PersistentWinBrowserCommandRunner:
     """Keep one Windows Chrome/CDP session alive for a whole customer run."""
 
@@ -66,11 +82,7 @@ class PersistentWinBrowserCommandRunner:
         cdp_url: str | None = None,
     ):
         self.wrapper_path = Path(wrapper_path)
-        self.node_path = str(
-            node_path
-            or os.environ.get("TEAMNOT_WINDOWS_NODE")
-            or "/mnt/c/Program Files/nodejs/node.exe"
-        )
+        self.node_path = str(node_path or detect_customer_browser_node())
         self.cdp_url = cdp_url or os.environ.get("TEAMNOT_CDP_URL") or "http://127.0.0.1:18801"
         self._explicit_cdp_url = bool(cdp_url or os.environ.get("TEAMNOT_CDP_URL"))
         self.script_path = Path(__file__).with_name("winbrowser_session.mjs")
@@ -242,6 +254,9 @@ class OpenClawWindowsCDPRunner:
         command_runner: CommandRunner | None = None,
     ):
         self.wrapper_path = _resolve_wrapper_path(wrapper_path)
+        self._uses_packaged_session = (
+            command_runner is None or isinstance(command_runner, PersistentWinBrowserCommandRunner)
+        )
         self._owns_persistent_session = command_runner is None
         self.command_runner = command_runner or PersistentWinBrowserCommandRunner(self.wrapper_path)
 
@@ -253,10 +268,11 @@ class OpenClawWindowsCDPRunner:
         out_dir: Path,
     ) -> CustomerReport:
         try:
-            if not self.wrapper_path.exists():
+            if not self.wrapper_path.exists() and not self._uses_packaged_session:
                 raise CustomerLoopRunnerError(
-                    "OpenClaw Windows CDP runner requires scripts/winbrowser. "
-                    "Install or provide the wrapper, or use --runner manual --evidence FILE."
+                    f"OpenClaw wrapper not found: {self.wrapper_path}. "
+                    "Use the packaged browser session by omitting a custom command runner, "
+                    "or provide a valid --wrapper path."
                 )
             screenshots = out_dir / "screenshots"
             screenshots.mkdir(parents=True, exist_ok=True)

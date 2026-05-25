@@ -5,15 +5,109 @@ import os from "node:os";
 import readline from "node:readline";
 import { createRequire } from "node:module";
 
-let chromium;
-try {
-  ({ chromium } = await import("playwright-core"));
-} catch {
+const PLAYWRIGHT_CORE_PACKAGE = process.env.TEAMNOT_PLAYWRIGHT_CORE_PACKAGE || "playwright-core@^1.57.0";
+
+async function loadPlaywrightCore() {
+  try {
+    return await import("playwright-core");
+  } catch (firstErr) {
+    return await loadPlaywrightCoreFallback(firstErr);
+  }
+}
+
+async function loadPlaywrightCoreFallback(firstErr) {
   const moduleBase = process.env.TEAMNOT_PLAYWRIGHT_REQUIRE_FROM
     || `file:///C:/Users/${os.userInfo().username}/OpenClawTools/browser-control.mjs`;
-  const requireFromOpenClawTools = createRequire(moduleBase);
-  ({ chromium } = requireFromOpenClawTools("playwright-core"));
+  try {
+    const requireFromOpenClawTools = createRequire(moduleBase);
+    return requireFromOpenClawTools("playwright-core");
+  } catch (fallbackErr) {
+    return await bootstrapPlaywrightCore(firstErr, fallbackErr);
+  }
 }
+
+async function bootstrapPlaywrightCore(firstErr, fallbackErr) {
+  if (process.env.TEAMNOT_DISABLE_BROWSER_BOOTSTRAP) {
+    throw new Error(playwrightMissingMessage(firstErr, fallbackErr, "auto-bootstrap disabled"));
+  }
+  const runtimeDir = process.env.TEAMNOT_BROWSER_RUNTIME_DIR
+    || path.join(os.homedir(), ".cache", "teamnot", "browser-runtime");
+  await fs.mkdir(runtimeDir, { recursive: true });
+  const packageJson = path.join(runtimeDir, "package.json");
+  if (!await exists(packageJson)) {
+    await fs.writeFile(
+      packageJson,
+      JSON.stringify({ private: true, dependencies: {} }, null, 2) + "\n",
+      "utf8",
+    );
+  }
+  const install = await runProcess(npmCommand(), [
+    "install",
+    PLAYWRIGHT_CORE_PACKAGE,
+    "--no-audit",
+    "--no-fund",
+    "--silent",
+  ], runtimeDir, 120000);
+  if (install.code !== 0) {
+    throw new Error(playwrightMissingMessage(
+      firstErr,
+      fallbackErr,
+      `npm bootstrap failed in ${runtimeDir}: ${(install.stderr || install.stdout).slice(0, 1200)}`,
+    ));
+  }
+  const requireFromRuntime = createRequire(packageJson);
+  return requireFromRuntime("playwright-core");
+}
+
+function playwrightMissingMessage(firstErr, fallbackErr, finalReason) {
+  return "TeamNoT customer browser session requires playwright-core. "
+    + "TeamNoT tried direct import, OpenClawTools fallback, and user-level auto-bootstrap. "
+    + "Install Node/npm or set TEAMNOT_PLAYWRIGHT_REQUIRE_FROM / TEAMNOT_BROWSER_RUNTIME_DIR. "
+    + `direct import: ${firstErr?.message || firstErr}; `
+    + `fallback: ${fallbackErr?.message || fallbackErr}; `
+    + `final: ${finalReason}`;
+}
+
+function npmCommand() {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
+}
+
+async function exists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function runProcess(command, args, cwd, timeoutMs) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { cwd, shell: false });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      resolve({ code: 124, stdout, stderr: `${stderr}\nTimed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({ code: 127, stdout, stderr: String(err?.message || err) });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? 1, stdout, stderr });
+    });
+  });
+}
+
+const { chromium } = await loadPlaywrightCore();
 
 const args = process.argv.slice(2);
 const getArg = (name, fallback = "") => {
@@ -59,10 +153,46 @@ async function probeCdp() {
   }
 }
 
-function browserExe() {
-  if (browserName === "brave") return "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
-  if (browserName === "edge") return "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe";
-  return "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+function browserExeCandidates() {
+  if (process.env.TEAMNOT_BROWSER_EXE) return [process.env.TEAMNOT_BROWSER_EXE];
+  const platform = process.platform;
+  if (platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+    if (browserName === "brave") return [
+      "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+      "C:\\Program Files (x86)\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+      path.join(localAppData, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+    ];
+    if (browserName === "edge") return [
+      "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+      "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+      path.join(localAppData, "Microsoft", "Edge", "Application", "msedge.exe"),
+    ];
+    return [
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+      path.join(localAppData, "Google", "Chrome", "Application", "chrome.exe"),
+    ];
+  }
+  if (platform === "darwin") {
+    if (browserName === "brave") return [
+      "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+      path.join(os.homedir(), "Applications", "Brave Browser.app", "Contents", "MacOS", "Brave Browser"),
+    ];
+    if (browserName === "edge") return [
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+      path.join(os.homedir(), "Applications", "Microsoft Edge.app", "Contents", "MacOS", "Microsoft Edge"),
+    ];
+    return [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      path.join(os.homedir(), "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome"),
+      "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+    ];
+  }
+  if (browserName === "brave") return ["brave-browser", "brave", "chromium", "chromium-browser"];
+  if (browserName === "edge") return ["microsoft-edge", "microsoft-edge-stable"];
+  if (browserName === "chromium") return ["chromium", "chromium-browser"];
+  return ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"];
 }
 
 function cdpPort() {
@@ -84,16 +214,32 @@ function profileDirForReport(ensured) {
 
 async function startBrowser() {
   await fs.mkdir(userDataDir, { recursive: true });
-  const child = spawn(browserExe(), [
-    "--remote-debugging-address=127.0.0.1",
-    `--remote-debugging-port=${cdpPort()}`,
-    `--user-data-dir=${userDataDir}`,
-    "--no-first-run",
-    "--no-default-browser-check",
-    "about:blank",
-  ], { detached: true, stdio: "ignore" });
-  child.unref();
-  return { pid: child.pid, userDataDir };
+  const attempts = [];
+  for (const executable of browserExeCandidates()) {
+    try {
+      const child = spawn(executable, [
+        "--remote-debugging-address=127.0.0.1",
+        `--remote-debugging-port=${cdpPort()}`,
+        `--user-data-dir=${userDataDir}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+      ], { detached: true, stdio: "ignore" });
+      await new Promise((resolve, reject) => {
+        child.once("error", reject);
+        setTimeout(resolve, 50);
+      });
+      child.unref();
+      return { pid: child.pid, executable, userDataDir };
+    } catch (err) {
+      attempts.push(`${executable}: ${String(err?.message || err)}`);
+    }
+  }
+  throw new Error(
+    "Could not start Chrome/Edge/Brave for TeamNoT customer testing. "
+    + "Set TEAMNOT_BROWSER_EXE to the browser executable path or install a supported browser. "
+    + `Tried: ${attempts.join("; ")}`,
+  );
 }
 
 async function ensureCdp() {
@@ -803,6 +949,14 @@ async function pGotoOrigin(origin) {
 
 async function handle(command) {
   const action = command.action || "status";
+  if (action === "close" && !rawMode) {
+    if (page && !page.isClosed()) await page.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
+    browser = null;
+    context = null;
+    page = null;
+    return { ok: true, action, cdp, sessionId };
+  }
   if (rawMode) {
     return await rawHandle(command);
   }

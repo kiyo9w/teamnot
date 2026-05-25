@@ -47,7 +47,7 @@ def inspect_customer_flow_pack(
     command_runner: CommandRunner | None = None,
 ) -> CustomerFlowPack:
     wrapper = _resolve_wrapper_path(wrapper_path)
-    if not wrapper.exists():
+    if command_runner is None and not wrapper.exists():
         raise FileNotFoundError(f"Browser wrapper not found: {wrapper}")
     runner = command_runner or _default_runner
     planned_routes = routes or discover_customer_routes(
@@ -75,7 +75,7 @@ def explore_product(
     command_runner: CommandRunner | None = None,
 ) -> ProductExplorationPlan:
     wrapper = _resolve_wrapper_path(wrapper_path)
-    if not wrapper.exists():
+    if command_runner is None and not wrapper.exists():
         raise FileNotFoundError(f"Browser wrapper not found: {wrapper}")
     runner = command_runner or _default_runner
     base_route = _target_route(target)
@@ -143,7 +143,7 @@ def discover_customer_routes(
     command_runner: CommandRunner | None = None,
 ) -> list[str]:
     wrapper = _resolve_wrapper_path(wrapper_path)
-    if not wrapper.exists():
+    if command_runner is None and not wrapper.exists():
         raise FileNotFoundError(f"Browser wrapper not found: {wrapper}")
     runner = command_runner or _default_runner
     base_route = _target_route(target)

@@ -60,7 +60,9 @@ from teamnot.customer_loop import (
     OpenClawWindowsInteractiveRunner,
     OpenClawWindowsResearcherRunner,
     OpenClawWindowsSessionRunner,
+    PersistentWinBrowserCommandRunner,
     default_customer_test_plan,
+    detect_customer_browser_node,
     explore_product,
     inspect_customer_flow_pack,
     load_domain_oracles,
@@ -464,6 +466,7 @@ def customer_flow_inspect(
     out_path: Path,
     wrapper_path: Path,
 ) -> None:
+    browser_runner = PersistentWinBrowserCommandRunner(wrapper_path)
     try:
         profile = load_model(profile_path, CustomerProfile)
         flow_pack = inspect_customer_flow_pack(
@@ -471,12 +474,15 @@ def customer_flow_inspect(
             profile,
             list(routes),
             wrapper_path=wrapper_path,
+            command_runner=browser_runner,
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         save_yaml(flow_pack, out_path)
     except (CustomerLoopError, FileNotFoundError, RuntimeError) as e:
         console.print(f"[red]Customer flow inspect failed:[/red] {e}")
         sys.exit(1)
+    finally:
+        browser_runner.close()
     console.print(f"[green]Customer flow inspect written:[/green] {out_path}")
 
 
@@ -498,6 +504,7 @@ def customer_explore(
     max_routes: int,
     wrapper_path: Path,
 ) -> None:
+    browser_runner = PersistentWinBrowserCommandRunner(wrapper_path)
     try:
         profile = load_model(profile_path, CustomerProfile)
         exploration = explore_product(
@@ -505,12 +512,15 @@ def customer_explore(
             profile,
             max_routes=max_routes,
             wrapper_path=wrapper_path,
+            command_runner=browser_runner,
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         save_yaml(exploration, out_path)
     except (CustomerLoopError, FileNotFoundError, RuntimeError) as e:
         console.print(f"[red]Customer exploration failed:[/red] {e}")
         sys.exit(1)
+    finally:
+        browser_runner.close()
     console.print(f"[green]Customer exploration written:[/green] {out_path}")
 
 
@@ -541,6 +551,7 @@ def customer_flow_session(
     seeded_state_path: Path | None,
     domain_oracle_path: Path | None,
 ) -> None:
+    browser_runner = PersistentWinBrowserCommandRunner(wrapper_path)
     try:
         profile = load_model(profile_path, CustomerProfile)
         target_model = ExperienceTarget(url=target)
@@ -552,6 +563,7 @@ def customer_flow_session(
                 target_model,
                 profile,
                 wrapper_path=wrapper_path,
+                command_runner=browser_runner,
             )
             save_yaml(exploration, out_dir / "product_exploration.yaml")
             planned_routes = routes_from_exploration(exploration)
@@ -560,6 +572,7 @@ def customer_flow_session(
             profile,
             planned_routes,
             wrapper_path=wrapper_path,
+            command_runner=browser_runner,
         )
         runnable = make_flow_pack_runnable(inspected, file_fixture_path=file_fixture_path)
         save_yaml(inspected, out_dir / "inspected_flow.yaml")
@@ -572,7 +585,11 @@ def customer_flow_session(
             flow_path=out_dir / "runnable_flow.yaml",
             seeded_state_path=seeded_state_path,
         ))
-        report = OpenClawWindowsFlowRunner(runnable, wrapper_path=wrapper_path).run(target_model, profile, plan, out_dir)
+        report = OpenClawWindowsFlowRunner(
+            runnable,
+            wrapper_path=wrapper_path,
+            command_runner=browser_runner,
+        ).run(target_model, profile, plan, out_dir)
         if seeded_state_path:
             report.seeded_state = load_seeded_state(seeded_state_path)
             report.seeded_state.adapter_status = "contract_recorded"
@@ -594,6 +611,8 @@ def customer_flow_session(
     except (CustomerLoopError, FileNotFoundError, RuntimeError) as e:
         console.print(f"[red]Customer flow session failed:[/red] {e}")
         sys.exit(1)
+    finally:
+        browser_runner.close()
     console.print(f"[green]Customer flow session artifacts written:[/green] {out_dir}")
 
 
@@ -786,6 +805,88 @@ def doctor() -> None:
             checks.append((f"${var}", True, f"set ({masked})"))
         else:
             checks.append((f"${var}", True, "(not set — optional)"))
+
+    # Customer-loop browser runtime
+    browser_session = Path(__file__).parents[1] / "customer_loop" / "winbrowser_session.mjs"
+    checks.append((
+        "customer browser session",
+        browser_session.exists(),
+        str(browser_session) if browser_session.exists() else "missing packaged winbrowser_session.mjs",
+    ))
+    node_cmd = detect_customer_browser_node()
+    node_ok = False
+    try:
+        node_rc = subprocess.run([node_cmd, "--version"], capture_output=True, text=True, timeout=5)
+        node_ok = node_rc.returncode == 0
+        node_detail = node_rc.stdout.strip() if node_ok else (node_rc.stderr.strip() or str(node_cmd))
+    except Exception as e:
+        node_detail = (
+            f"{e}; install Node.js or set TEAMNOT_NODE/TEAMNOT_WINDOWS_NODE for browser customer tests"
+        )
+    checks.append(("customer browser node", node_ok, node_detail))
+    if node_ok:
+        playwright_probe = """
+import os from "node:os";
+import { createRequire } from "node:module";
+try {
+  await import("playwright-core");
+  console.log("playwright-core import ok");
+} catch (firstErr) {
+  const moduleBase = process.env.TEAMNOT_PLAYWRIGHT_REQUIRE_FROM
+    || `file:///C:/Users/${os.userInfo().username}/OpenClawTools/browser-control.mjs`;
+  try {
+    const req = createRequire(moduleBase);
+    req.resolve("playwright-core");
+    console.log(`playwright-core fallback ok via ${moduleBase}`);
+  } catch (fallbackErr) {
+    console.error(`playwright-core missing: ${firstErr?.message || firstErr}; fallback: ${fallbackErr?.message || fallbackErr}`);
+    process.exit(1);
+  }
+}
+""".strip()
+        rc = subprocess.run(
+            [node_cmd, "--input-type=module", "-e", playwright_probe],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        playwright_ok = rc.returncode == 0
+        playwright_detail = (rc.stdout or rc.stderr).strip()
+        if not playwright_ok:
+            npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
+            try:
+                npm_rc = subprocess.run(
+                    [npm_cmd, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                npm_ok = npm_rc.returncode == 0
+            except Exception:
+                npm_ok = False
+            if npm_ok:
+                playwright_ok = True
+                playwright_detail = (
+                    "playwright-core not installed yet; customer browser runtime will auto-bootstrap "
+                    f"it with {npm_cmd} into TEAMNOT_BROWSER_RUNTIME_DIR on first browser run"
+                )
+        checks.append((
+            "customer browser playwright-core",
+            playwright_ok,
+            playwright_detail,
+        ))
+    cdp_url = os.environ.get("TEAMNOT_CDP_URL") or "http://127.0.0.1:18801"
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(f"{cdp_url.rstrip('/')}/json/version", timeout=1.5) as response:
+            cdp_detail = f"reachable ({response.status}) at {cdp_url}"
+    except Exception as e:
+        cdp_detail = (
+            f"not currently reachable at {cdp_url}; packaged browser session will try to start Chrome. "
+            f"Set TEAMNOT_BROWSER_EXE if Chrome/Edge/Brave is not in the default location. Probe: {e}"
+        )
+    checks.append(("customer browser CDP", True, cdp_detail))
 
     # Skills bundled
     try:
