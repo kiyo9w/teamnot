@@ -27,6 +27,7 @@ from datetime import datetime
 from teamnot.brief import Brief
 from teamnot.safety import CostGuard, WorkerNotAllowedError, WorkerPausedError
 from teamnot.workers.claude_cli import ClaudeCliWorker
+from teamnot.workers.codex_cli import CodexCliWorker
 from teamnot.workers.minimax import MinimaxWorker
 from teamnot.workspace import Workspace
 
@@ -48,6 +49,7 @@ class DualPlanResult:
     final_plan_raw: str
     minimax: PlanStreamResult | None = None
     claude: PlanStreamResult | None = None
+    codex: PlanStreamResult | None = None
     review_raw: str = ""
     plan_file: str | None = None
     total_elapsed_s: float = 0.0
@@ -59,6 +61,8 @@ class DualPlanResult:
             bits.append(f"minimax={'OK' if self.minimax.success else 'FAIL'}/{self.minimax.elapsed_s:.1f}s")
         if self.claude:
             bits.append(f"claude={'OK' if self.claude.success else 'FAIL'}/{self.claude.elapsed_s:.1f}s")
+        if self.codex:
+            bits.append(f"codex={'OK' if self.codex.success else 'FAIL'}/{self.codex.elapsed_s:.1f}s")
         return f"DualPlan: {'OK' if self.success else 'FAIL'} ({', '.join(bits)})"
 
 
@@ -167,6 +171,60 @@ def _plan_with_claude(
         )
 
 
+def _plan_with_codex(
+    brief: Brief,
+    codex: CodexCliWorker,
+) -> PlanStreamResult:
+    start = time.time()
+    prompt = (
+        f"You are a senior PM/Tech Lead for project {brief.project.name}.\n\n"
+        f"Decompose this software requirement into executable tasks.\n\n"
+        f"REQUIREMENT:\n{brief.task.description}\n\n"
+        f"Stack: {', '.join(brief.project.stack) or 'unspecified'}\n"
+        f"Languages: {', '.join(brief.project.language) or 'unspecified'}\n\n"
+        f"Output ONLY valid JSON with this structure:\n"
+        '{"plan_name": "...", "tasks": [{"id": "T1", "title": "...", '
+        '"description": "detailed with file paths", "domain": "FE|BE|AI|DevOps|QA", '
+        '"depends_on": [], "estimated_minutes": N, "model_suggestion": "...", '
+        '"acceptance_criteria": ["..."]}], '
+        '"architecture_notes": "...", "risks": ["..."], "tech_stack": ["..."]}\n\n'
+        "Be specific about file paths, API endpoints, and dependencies. "
+        "Read conventions.md and memory.md before planning."
+    )
+    try:
+        result = codex.run(
+            prompt=prompt,
+            allowed_tools=["Read", "Glob", "Grep"],
+            timeout=180,
+            note="dual_plan_codex",
+        )
+        success = bool(result.output.strip()) and result.returncode == 0
+        return PlanStreamResult(
+            source="codex",
+            raw=result.output,
+            elapsed_s=round(time.time() - start, 1),
+            success=success,
+            error="" if success else result.stderr or f"rc={result.returncode}",
+        )
+    except (WorkerNotAllowedError, WorkerPausedError) as e:
+        return PlanStreamResult(
+            source="codex",
+            raw="",
+            elapsed_s=round(time.time() - start, 1),
+            success=False,
+            error=f"cost guard refused: {e}",
+        )
+    except Exception as e:
+        logger.warning("codex planning failed: %s", e)
+        return PlanStreamResult(
+            source="codex",
+            raw="",
+            elapsed_s=round(time.time() - start, 1),
+            success=False,
+            error=f"{type(e).__name__}: {e}",
+        )
+
+
 def _claude_review(
     brief: Brief,
     claude: ClaudeCliWorker,
@@ -205,6 +263,7 @@ def dual_plan(
     cost_guard: CostGuard,
     claude: ClaudeCliWorker | None = None,
     minimax: MinimaxWorker | None = None,
+    codex: CodexCliWorker | None = None,
 ) -> DualPlanResult:
     """Run the dual planning pipeline.
 
@@ -227,13 +286,16 @@ def dual_plan(
         )
     )
     claude_usable = (claude is not None) and claude.is_available()
+    codex_usable = (codex is not None) and codex.is_available()
 
     if not minimax_usable:
         notes.append("minimax planning skipped (no API key, no opt-in, or worker missing)")
     if not claude_usable:
         notes.append("claude planning skipped (CLI not found)")
+    if not codex_usable:
+        notes.append("codex planning skipped (CLI not found)")
 
-    if not minimax_usable and not claude_usable:
+    if not minimax_usable and not claude_usable and not codex_usable:
         stub_plan = (
             f'{{"plan_name": "{brief.task.title}", '
             f'"tasks": [{{"id": "T1", "title": "{brief.task.title}", '
@@ -254,6 +316,7 @@ def dual_plan(
     # ── Run streams in parallel ─────────────────────────────────────────────
     minimax_result: PlanStreamResult | None = None
     claude_result: PlanStreamResult | None = None
+    codex_result: PlanStreamResult | None = None
 
     def _run_minimax():
         nonlocal minimax_result
@@ -263,6 +326,10 @@ def dual_plan(
         nonlocal claude_result
         claude_result = _plan_with_claude(brief, claude)  # type: ignore[arg-type]
 
+    def _run_codex():
+        nonlocal codex_result
+        codex_result = _plan_with_codex(brief, codex)  # type: ignore[arg-type]
+
     threads: list[threading.Thread] = []
     if minimax_usable:
         t = threading.Thread(target=_run_minimax, name="dual_plan_minimax")
@@ -270,6 +337,10 @@ def dual_plan(
         t.start()
     if claude_usable:
         t = threading.Thread(target=_run_claude, name="dual_plan_claude")
+        threads.append(t)
+        t.start()
+    if codex_usable:
+        t = threading.Thread(target=_run_codex, name="dual_plan_codex")
         threads.append(t)
         t.start()
     for t in threads:
@@ -288,10 +359,14 @@ def dual_plan(
         review_raw = ""
         final_raw = claude_result.raw
         notes.append("minimax failed/unavailable — using claude plan directly")
+    elif codex_result and codex_result.success:
+        review_raw = ""
+        final_raw = codex_result.raw
+        notes.append("minimax/claude failed or unavailable — using codex plan directly")
     elif minimax_result and minimax_result.success:
         review_raw = ""
         final_raw = minimax_result.raw
-        notes.append("claude failed/unavailable — using minimax plan directly")
+        notes.append("cli planners failed/unavailable — using minimax plan directly")
     else:
         review_raw = ""
         final_raw = ""
@@ -315,6 +390,11 @@ def dual_plan(
 {(claude_result.raw if claude_result else 'not run')[:3000]}
 ```
 
+## Plan C — Codex CLI
+```
+{(codex_result.raw if codex_result else 'not run')[:3000]}
+```
+
 ## Final Consolidated Plan
 ```
 {final_raw[:5000]}
@@ -331,6 +411,7 @@ def dual_plan(
         final_plan_raw=final_raw,
         minimax=minimax_result,
         claude=claude_result,
+        codex=codex_result,
         review_raw=review_raw,
         plan_file=plan_file,
         total_elapsed_s=round(time.time() - total_start, 1),

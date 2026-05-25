@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Force UTF-8 on Windows consoles so rich can emit arrows/box characters.
@@ -42,6 +44,34 @@ from teamnot.brief import (
     example_brief,
     load_brief,
     save_brief,
+)
+from teamnot.customer_loop import (
+    CustomerLoopConfig,
+    CustomerLoopError,
+    CustomerLoopOrchestrator,
+    CustomerLoopRunnerError,
+    CustomerLoopRunnerName,
+    CustomerProfile,
+    CustomerSeverity,
+    ExperienceTarget,
+    ManualEvidenceRunner,
+    OpenClawWindowsCDPRunner,
+    OpenClawWindowsFlowRunner,
+    OpenClawWindowsInteractiveRunner,
+    OpenClawWindowsResearcherRunner,
+    OpenClawWindowsSessionRunner,
+    default_customer_test_plan,
+    explore_product,
+    inspect_customer_flow_pack,
+    load_domain_oracles,
+    load_model,
+    load_seeded_state,
+    make_flow_pack_runnable,
+    render_flow_refinement_report,
+    routes_from_exploration,
+    save_yaml,
+    suggest_customer_flow_pack,
+    write_report_artifacts,
 )
 from teamnot.dod import DoDEvaluator
 from teamnot.engine import Worker
@@ -310,6 +340,369 @@ def _print_brief_summary(brief: Brief) -> None:
     console.print(Panel.fit(body, title="Brief OK", border_style="green"))
 
 
+# ── customer loop ────────────────────────────────────────────────────────────
+
+RUNNER_CHOICES = [runner.value for runner in CustomerLoopRunnerName]
+SEVERITY_CHOICES = ["critical", "high", "medium", "low"]
+
+
+@main.command("customer-test", help="Run or ingest a customer test into customer-loop artifacts.")
+@click.option("--target", required=True, help="Target product URL.")
+@click.option("--profile", "profile_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              required=True, help="Customer profile YAML.")
+@click.option("--out", "out_dir", type=click.Path(file_okay=False, path_type=Path),
+              required=True, help="Output artifact directory.")
+@click.option("--runner", type=click.Choice(RUNNER_CHOICES), default=CustomerLoopRunnerName.manual.value,
+              show_default=True,
+              help="manual ingests an existing report; openclaw-windows-cdp probes readiness; openclaw-windows-interactive clicks a sample/demo flow; openclaw-windows-flow runs a configured customer flow; openclaw-windows-session explores, plans, and runs fresh flows each iteration.")
+@click.option("--evidence", "evidence_path", type=click.Path(exists=False, dir_okay=False, path_type=Path),
+              default=None, help="Existing evidence file for manual mode.")
+@click.option("--flow", "flow_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Customer flow YAML for openclaw-windows-flow mode.")
+@click.option("--seeded-state", "seeded_state_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Seeded account/state fixture for browser-capable customer tests.")
+@click.option("--domain-oracle", "domain_oracle_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Domain output oracle YAML for correctness coverage metadata.")
+def customer_test(
+    target: str,
+    profile_path: Path,
+    out_dir: Path,
+    runner: str,
+    evidence_path: Path | None,
+    flow_path: Path | None,
+    seeded_state_path: Path | None,
+    domain_oracle_path: Path | None,
+) -> None:
+    try:
+        profile = load_model(profile_path, CustomerProfile)
+        target_model = ExperienceTarget(url=target)
+        config = CustomerLoopConfig(
+            target=target_model,
+            profile=profile,
+            out_dir=out_dir,
+            runner=CustomerLoopRunnerName(runner),
+            evidence_path=evidence_path,
+            flow_path=flow_path,
+            seeded_state_path=seeded_state_path,
+            seeded_state=load_seeded_state(seeded_state_path) if seeded_state_path else None,
+            domain_oracle_path=domain_oracle_path,
+            domain_oracles=load_domain_oracles(domain_oracle_path) if domain_oracle_path else [],
+        )
+        plan = default_customer_test_plan(config)
+        if CustomerLoopRunnerName(runner) == CustomerLoopRunnerName.manual and evidence_path is None:
+            raise CustomerLoopRunnerError("--evidence is required for manual customer-test mode")
+        experience_runner = _customer_loop_runner(
+            CustomerLoopRunnerName(runner),
+            evidence_path,
+            flow_path,
+            seeded_state_path=seeded_state_path,
+            seeded_state=config.seeded_state,
+        )
+        report = experience_runner.run(target_model, profile, plan, out_dir)
+        from teamnot.customer_loop.research_planning import evaluate_domain_oracles
+
+        if config.seeded_state and report.seeded_state is None:
+            report.seeded_state = config.seeded_state.model_copy(deep=True)
+            report.seeded_state.adapter_status = "unsupported"
+            report.seeded_state.unsupported_blocker = (
+                f"Runner {runner} recorded the seeded-state contract but does not apply "
+                "cookies, localStorage, storageState, or login hints. Use openclaw-windows-researcher "
+                "for adapter-level seeded-state application."
+            )
+        report.domain_oracles = evaluate_domain_oracles(report, config.domain_oracles)
+        write_report_artifacts(out_dir, profile, plan, report)
+    except CustomerLoopError as e:
+        console.print(f"[red]Customer test failed:[/red] {e}")
+        sys.exit(1)
+    console.print(f"[green]Customer test artifacts written:[/green] {out_dir}")
+
+
+@main.command("customer-flow-plan", help="Generate a starter customer flow pack YAML.")
+@click.option("--target", required=True, help="Target product URL.")
+@click.option("--profile", "profile_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              required=True, help="Customer profile YAML.")
+@click.option("--route", "routes", multiple=True,
+              help="Product route/screen to include, such as /, /signup, /app/projects.")
+@click.option("--out", "out_path", type=click.Path(dir_okay=False, path_type=Path),
+              required=True, help="Output customer flow YAML path.")
+def customer_flow_plan(
+    target: str,
+    profile_path: Path,
+    routes: tuple[str, ...],
+    out_path: Path,
+) -> None:
+    try:
+        profile = load_model(profile_path, CustomerProfile)
+        flow_pack = suggest_customer_flow_pack(
+            ExperienceTarget(url=target),
+            profile,
+            list(routes),
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        save_yaml(flow_pack, out_path)
+    except CustomerLoopError as e:
+        console.print(f"[red]Customer flow plan failed:[/red] {e}")
+        sys.exit(1)
+    console.print(f"[green]Customer flow plan written:[/green] {out_path}")
+
+
+@main.command("customer-flow-inspect", help="Inspect browser DOM and generate a customer flow pack YAML.")
+@click.option("--target", required=True, help="Target product URL.")
+@click.option("--profile", "profile_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              required=True, help="Customer profile YAML.")
+@click.option("--route", "routes", multiple=True,
+              help="Product route/screen to inspect, such as /, /signup, /app/projects.")
+@click.option("--out", "out_path", type=click.Path(dir_okay=False, path_type=Path),
+              required=True, help="Output customer flow YAML path.")
+@click.option("--wrapper", "wrapper_path", type=click.Path(dir_okay=False, path_type=Path),
+              default=Path("scripts/winbrowser"), show_default=True,
+              help="Browser wrapper command for OpenClaw Windows CDP.")
+def customer_flow_inspect(
+    target: str,
+    profile_path: Path,
+    routes: tuple[str, ...],
+    out_path: Path,
+    wrapper_path: Path,
+) -> None:
+    try:
+        profile = load_model(profile_path, CustomerProfile)
+        flow_pack = inspect_customer_flow_pack(
+            ExperienceTarget(url=target),
+            profile,
+            list(routes),
+            wrapper_path=wrapper_path,
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        save_yaml(flow_pack, out_path)
+    except (CustomerLoopError, FileNotFoundError, RuntimeError) as e:
+        console.print(f"[red]Customer flow inspect failed:[/red] {e}")
+        sys.exit(1)
+    console.print(f"[green]Customer flow inspect written:[/green] {out_path}")
+
+
+@main.command("customer-explore", help="Map product routes, journeys, personas, and coverage gaps.")
+@click.option("--target", required=True, help="Target product URL.")
+@click.option("--profile", "profile_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              required=True, help="Customer profile YAML.")
+@click.option("--out", "out_path", type=click.Path(dir_okay=False, path_type=Path),
+              required=True, help="Output product exploration YAML path.")
+@click.option("--max-routes", type=int, default=12, show_default=True,
+              help="Maximum visible routes to map before flow selection.")
+@click.option("--wrapper", "wrapper_path", type=click.Path(dir_okay=False, path_type=Path),
+              default=Path("scripts/winbrowser"), show_default=True,
+              help="Browser wrapper command for OpenClaw Windows CDP.")
+def customer_explore(
+    target: str,
+    profile_path: Path,
+    out_path: Path,
+    max_routes: int,
+    wrapper_path: Path,
+) -> None:
+    try:
+        profile = load_model(profile_path, CustomerProfile)
+        exploration = explore_product(
+            ExperienceTarget(url=target),
+            profile,
+            max_routes=max_routes,
+            wrapper_path=wrapper_path,
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        save_yaml(exploration, out_path)
+    except (CustomerLoopError, FileNotFoundError, RuntimeError) as e:
+        console.print(f"[red]Customer exploration failed:[/red] {e}")
+        sys.exit(1)
+    console.print(f"[green]Customer exploration written:[/green] {out_path}")
+
+
+@main.command("customer-flow-session", help="Inspect, refine, run, and report a customer flow session.")
+@click.option("--target", required=True, help="Target product URL.")
+@click.option("--profile", "profile_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              required=True, help="Customer profile YAML.")
+@click.option("--route", "routes", multiple=True,
+              help="Product route/screen to inspect, such as /, /signup, /app/projects.")
+@click.option("--out", "out_dir", type=click.Path(file_okay=False, path_type=Path),
+              required=True, help="Output artifact directory.")
+@click.option("--wrapper", "wrapper_path", type=click.Path(dir_okay=False, path_type=Path),
+              default=Path("scripts/winbrowser"), show_default=True,
+              help="Browser wrapper command for OpenClaw Windows CDP.")
+@click.option("--file-fixture", "file_fixture_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Realistic local file for generated upload steps.")
+@click.option("--seeded-state", "seeded_state_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Seeded account/state fixture for authenticated route exploration.")
+@click.option("--domain-oracle", "domain_oracle_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Domain output oracle YAML for correctness coverage metadata.")
+def customer_flow_session(
+    target: str,
+    profile_path: Path,
+    routes: tuple[str, ...],
+    out_dir: Path,
+    wrapper_path: Path,
+    file_fixture_path: Path | None,
+    seeded_state_path: Path | None,
+    domain_oracle_path: Path | None,
+) -> None:
+    try:
+        profile = load_model(profile_path, CustomerProfile)
+        target_model = ExperienceTarget(url=target)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        exploration = None
+        planned_routes = list(routes)
+        if not planned_routes:
+            exploration = explore_product(
+                target_model,
+                profile,
+                wrapper_path=wrapper_path,
+            )
+            save_yaml(exploration, out_dir / "product_exploration.yaml")
+            planned_routes = routes_from_exploration(exploration)
+        inspected = inspect_customer_flow_pack(
+            target_model,
+            profile,
+            planned_routes,
+            wrapper_path=wrapper_path,
+        )
+        runnable = make_flow_pack_runnable(inspected, file_fixture_path=file_fixture_path)
+        save_yaml(inspected, out_dir / "inspected_flow.yaml")
+        save_yaml(runnable, out_dir / "runnable_flow.yaml")
+        plan = default_customer_test_plan(CustomerLoopConfig(
+            target=target_model,
+            profile=profile,
+            out_dir=out_dir,
+            runner=CustomerLoopRunnerName.openclaw_windows_flow,
+            flow_path=out_dir / "runnable_flow.yaml",
+            seeded_state_path=seeded_state_path,
+        ))
+        report = OpenClawWindowsFlowRunner(runnable, wrapper_path=wrapper_path).run(target_model, profile, plan, out_dir)
+        if seeded_state_path:
+            report.seeded_state = load_seeded_state(seeded_state_path)
+            report.seeded_state.adapter_status = "contract_recorded"
+            report.seeded_state.unsupported_blocker = (
+                "customer-flow-session records seeded state metadata; use openclaw-windows-researcher "
+                "for adapter-level cookie/localStorage application."
+            )
+        if domain_oracle_path:
+            from teamnot.customer_loop.research_planning import evaluate_domain_oracles
+
+            report.domain_oracles = evaluate_domain_oracles(report, load_domain_oracles(domain_oracle_path))
+        if exploration and report.evidence:
+            report.evidence[-1].metadata["product_exploration"] = exploration.model_dump(mode="json")
+        write_report_artifacts(out_dir, profile, plan, report)
+        (out_dir / "flow_refinement_report.md").write_text(
+            render_flow_refinement_report(inspected, runnable, report),
+            encoding="utf-8",
+        )
+    except (CustomerLoopError, FileNotFoundError, RuntimeError) as e:
+        console.print(f"[red]Customer flow session failed:[/red] {e}")
+        sys.exit(1)
+    console.print(f"[green]Customer flow session artifacts written:[/green] {out_dir}")
+
+
+@main.command("customer-loop", help="Generate a customer-centered report and next TeamNoT brief.")
+@click.option("--target", required=True, help="Target product URL.")
+@click.option("--profile", "profile_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              required=True, help="Customer profile YAML.")
+@click.option("--out", "out_dir", type=click.Path(file_okay=False, path_type=Path),
+              default=None, help="Output artifact directory.")
+@click.option("--max-iterations", type=int, default=1, show_default=True)
+@click.option("--severity-threshold", type=click.Choice(SEVERITY_CHOICES),
+              default=CustomerSeverity.high.value, show_default=True)
+@click.option("--run-teamnot/--no-run-teamnot", default=False, show_default=True)
+@click.option("--runner", type=click.Choice(RUNNER_CHOICES), default=CustomerLoopRunnerName.manual.value,
+              show_default=True,
+              help="manual ingests evidence; cdp probes readiness; interactive clicks a sample/demo flow; flow runs configured flows; session explores and runs flows; researcher adds branch planning/form/adversarial evidence.")
+@click.option("--evidence", "evidence_path", type=click.Path(exists=False, dir_okay=False, path_type=Path),
+              default=None, help="Existing evidence file for manual mode.")
+@click.option("--flow", "flow_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Customer flow YAML for openclaw-windows-flow mode.")
+@click.option("--file-fixture", "file_fixture_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Realistic local file for generated upload steps in openclaw-windows-session mode.")
+@click.option("--seeded-state", "seeded_state_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Seeded account/state fixture for openclaw-windows-researcher authenticated journeys.")
+@click.option("--domain-oracle", "domain_oracle_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None, help="Domain output oracle YAML for expected outputs, golden files, API checks, rubrics, or manual checkpoints.")
+@click.option("--previous-brief", "previous_brief_path",
+              type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
+              help="Optional previous TeamNoT brief for project metadata.")
+def customer_loop(
+    target: str,
+    profile_path: Path,
+    out_dir: Path | None,
+    max_iterations: int,
+    severity_threshold: str,
+    run_teamnot: bool,
+    runner: str,
+    evidence_path: Path | None,
+    flow_path: Path | None,
+    file_fixture_path: Path | None,
+    seeded_state_path: Path | None,
+    domain_oracle_path: Path | None,
+    previous_brief_path: Path | None,
+) -> None:
+    out = out_dir or Path(".teamnot") / "customer-loop" / datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    try:
+        profile = load_model(profile_path, CustomerProfile)
+        config = CustomerLoopConfig(
+            target=ExperienceTarget(url=target),
+            profile=profile,
+            out_dir=out,
+            max_iterations=max_iterations,
+            severity_threshold=CustomerSeverity(severity_threshold),
+            run_teamnot=run_teamnot,
+            runner=CustomerLoopRunnerName(runner),
+            evidence_path=evidence_path,
+            flow_path=flow_path,
+            file_fixture_path=file_fixture_path,
+            seeded_state_path=seeded_state_path,
+            domain_oracle_path=domain_oracle_path,
+            previous_brief_path=previous_brief_path,
+        )
+        orchestrator = CustomerLoopOrchestrator(
+            run_teamnot_hook=_invoke_teamnot_run if run_teamnot else None
+        )
+        result = orchestrator.run(config)
+    except CustomerLoopError as e:
+        console.print(f"[red]Customer loop failed:[/red] {e}")
+        sys.exit(1)
+    if result.generated_brief:
+        console.print(f"[green]Generated brief:[/green] {out / 'generated_brief.yaml'}")
+    else:
+        console.print("[yellow]No follow-up brief generated; no blocker met the threshold.[/yellow]")
+    console.print(f"[green]Customer loop artifacts written:[/green] {out}")
+
+
+def _customer_loop_runner(
+    runner: CustomerLoopRunnerName,
+    evidence_path: Path | None,
+    flow_path: Path | None,
+    seeded_state_path: Path | None = None,
+    seeded_state=None,
+):
+    if runner == CustomerLoopRunnerName.manual:
+        if evidence_path is None:
+            raise CustomerLoopRunnerError("--evidence is required for manual customer-loop mode")
+        return ManualEvidenceRunner(evidence_path)
+    if runner == CustomerLoopRunnerName.openclaw_windows_flow:
+        if flow_path is None:
+            raise CustomerLoopRunnerError("--flow is required for openclaw-windows-flow mode")
+        from teamnot.customer_loop.models import CustomerFlowPack
+
+        return OpenClawWindowsFlowRunner(load_model(flow_path, CustomerFlowPack))
+    if runner == CustomerLoopRunnerName.openclaw_windows_interactive:
+        return OpenClawWindowsInteractiveRunner()
+    if runner == CustomerLoopRunnerName.openclaw_windows_session:
+        return OpenClawWindowsSessionRunner()
+    if runner == CustomerLoopRunnerName.openclaw_windows_researcher:
+        return OpenClawWindowsResearcherRunner(seeded_state_path=seeded_state_path, seeded_state=seeded_state)
+    return OpenClawWindowsCDPRunner()
+
+
+def _invoke_teamnot_run(brief_path: Path) -> None:
+    subprocess.run(
+        [sys.executable, "-m", "teamnot.cli", "run", "--brief", str(brief_path)],
+        check=True,
+    )
+
+
 # ── doctor ───────────────────────────────────────────────────────────────────
 
 @main.command(help="Check the local environment for everything TeamNoT needs.")
@@ -362,8 +755,19 @@ def doctor() -> None:
     except Exception:
         checks.append((
             "claude CLI",
+            True,
+            "not found (only required for skills using worker: claude_cli)",
+        ))
+
+    try:
+        from teamnot.workers.codex_cli import find_codex_cli
+        path = find_codex_cli()
+        checks.append(("codex CLI", True, path))
+    except Exception:
+        checks.append((
+            "codex CLI",
             False,
-            "not found — install: npm install -g @anthropic-ai/claude-code, then `claude login`",
+            "not found — install/login with Codex CLI, then run `codex doctor`",
         ))
 
     gh = shutil.which("gh")

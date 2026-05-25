@@ -2,14 +2,14 @@
 name: documenter
 role: Technical Writer
 description: Updates project memory and report after a successful run.
-worker: minimax
+worker: claude_cli
 tools: [Read, Write]
 talks_to: [coordinator]
 handoff_to: null
 inputs: [adr, diff, qa_report, dod_result]
 outputs: [memory_update, report]
 timeout_s: 180
-metered_ok: true
+metered_ok: false
 ---
 
 # Documenter agent

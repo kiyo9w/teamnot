@@ -52,6 +52,7 @@ task_queue*.json
 .teamnot/reports/
 .teamnot/plans/
 .teamnot/qa_reports/
+.teamnot/customer-loop/
 .teamnot/worker.lock
 
 # Secrets

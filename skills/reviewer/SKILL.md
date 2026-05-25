@@ -9,7 +9,7 @@ handoff_to: documenter
 inputs: [diff, adr, conventions, test_report]
 outputs: [review_verdict, qa_report]
 timeout_s: 300
-metered_ok: true
+metered_ok: false
 ---
 
 # Reviewer agent

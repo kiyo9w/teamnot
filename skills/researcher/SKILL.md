@@ -2,14 +2,14 @@
 name: researcher
 role: Technical Researcher
 description: Compares libraries and prior art on demand. Never writes code.
-worker: minimax
+worker: claude_cli
 tools: [Read, Glob, Grep]
 talks_to: [coordinator, architect]
 handoff_to: architect
 inputs: [research_question]
 outputs: [research_brief]
 timeout_s: 180
-metered_ok: true
+metered_ok: false
 ---
 
 # Researcher agent
