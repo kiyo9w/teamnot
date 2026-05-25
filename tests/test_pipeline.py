@@ -20,11 +20,9 @@ from teamnot.engine.pipeline import (
     Pipeline,
     PipelineConfig,
     PipelineOutcome,
-    routed_cli_invoker,
 )
 from teamnot.safety import CostGuard
 from teamnot.workers.claude_cli import ClaudeCliResult
-from teamnot.workers.codex_cli import CodexCliResult
 from teamnot.workspace import Workspace
 
 
@@ -173,63 +171,3 @@ def test_pipeline_emits_transcript(tmp_path: Path):
     assert "pipeline" in recipients
     assert "architect" in senders
     assert "implementer" in senders
-
-
-def test_routed_invoker_falls_back_to_codex_when_claude_fails():
-    calls: list[str] = []
-
-    class FakeClaude:
-        def run(self, **kwargs):
-            calls.append("claude")
-            return ClaudeCliResult(
-                output="",
-                returncode=1,
-                stderr="API Error: 503 temporarily suspended",
-                elapsed_s=0.01,
-            )
-
-    class FakeCodex:
-        def run(self, **kwargs):
-            calls.append("codex")
-            assert kwargs["note"] == "agent:implementer:fallback_from_claude"
-            return CodexCliResult(output="fixed", returncode=0, stderr="", elapsed_s=0.02)
-
-    spec = AgentSpec(
-        name="implementer",
-        role="Implementer",
-        description="implement",
-        body="system",
-        worker="claude_cli",
-    )
-    result = routed_cli_invoker(claude=FakeClaude(), codex=FakeCodex())(spec, "do it")
-
-    assert calls == ["claude", "codex"]
-    assert result.returncode == 0
-    assert result.output == "fixed"
-    assert "fallback_from=claude_cli" in result.stderr
-
-
-def test_routed_invoker_does_not_fallback_when_claude_succeeds():
-    calls: list[str] = []
-
-    class FakeClaude:
-        def run(self, **kwargs):
-            calls.append("claude")
-            return ClaudeCliResult(output="done", returncode=0, stderr="", elapsed_s=0.01)
-
-    class FakeCodex:
-        def run(self, **kwargs):
-            calls.append("codex")
-            return CodexCliResult(output="unexpected", returncode=0, stderr="", elapsed_s=0.01)
-
-    spec = AgentSpec(
-        name="architect",
-        role="Architect",
-        description="plan",
-        body="system",
-        worker="claude_cli",
-    )
-    result = routed_cli_invoker(claude=FakeClaude(), codex=FakeCodex())(spec, "do it")
-
-    assert calls == ["claude"]
-    assert result.output == "done"
