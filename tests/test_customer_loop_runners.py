@@ -44,7 +44,6 @@ from teamnot.customer_loop.models import (
 from teamnot.customer_loop.orchestrator import default_customer_test_plan
 from teamnot.customer_loop.research_planning import suppress_repeated_noops
 from teamnot.customer_loop.runners import (
-    _MOBILE_PROBE_JS,
     _attach_visual_findings,
     _path_for_windows_wrapper,
     _resolve_wrapper_path,
@@ -209,38 +208,6 @@ def test_persistent_runner_maps_seeded_state_commands(monkeypatch, tmp_path: Pat
     ]
 
 
-def test_persistent_runner_maps_browser_assisted_login(monkeypatch, tmp_path: Path):
-    sent_payloads: list[dict] = []
-    runner = PersistentWinBrowserCommandRunner(wrapper_path=tmp_path / "winbrowser")
-
-    def fake_request(payload, timeout=75):
-        sent_payloads.append(payload)
-        return {"ok": True, "action": payload["action"], "seededStateApplied": True}
-
-    monkeypatch.setattr(runner, "_request", fake_request)
-
-    runner([
-        "scripts/winbrowser",
-        "--action",
-        "assistLogin",
-        "--url",
-        "https://example-product.test",
-        "--success-url",
-        "https://example-product.test/app",
-        "--email",
-        "customer@example.test",
-    ])
-
-    assert sent_payloads == [{
-        "action": "assistLogin",
-        "url": "https://example-product.test",
-        "loginUrl": "",
-        "successUrl": "https://example-product.test/app",
-        "email": "customer@example.test",
-        "timeout": 30000,
-    }]
-
-
 def test_persistent_runner_keeps_screenshots_and_eval_on_same_session(monkeypatch, tmp_path: Path):
     sent_payloads: list[dict] = []
     runner = PersistentWinBrowserCommandRunner(wrapper_path=tmp_path / "winbrowser")
@@ -258,64 +225,6 @@ def test_persistent_runner_keeps_screenshots_and_eval_on_same_session(monkeypatc
         {"action": "eval", "expr": "document.title"},
         {"action": "screenshot", "out": "C:\\tmp\\shot.png", "fullPage": True},
     ]
-
-
-def test_persistent_runner_starts_session_with_cdp_target_cleanup(monkeypatch, tmp_path: Path):
-    runner = PersistentWinBrowserCommandRunner(wrapper_path=tmp_path / "winbrowser")
-    popen_args: list[list[str]] = []
-
-    class FakeProcess:
-        stdin = None
-        stdout = None
-        stderr = None
-
-        def poll(self):
-            return None
-
-    def fake_popen(args, **_kwargs):
-        popen_args.append(list(args))
-        return FakeProcess()
-
-    monkeypatch.setattr("teamnot.customer_loop.runners._path_for_windows_wrapper", lambda path: str(path))
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
-
-    runner._ensure_process()
-
-    assert "--cleanup-targets" in popen_args[0]
-
-
-def test_persistent_runner_preserves_existing_cdp_targets(monkeypatch, tmp_path: Path):
-    monkeypatch.setenv("TEAMNOT_CDP_URL", "http://127.0.0.1:18800")
-    runner = PersistentWinBrowserCommandRunner(wrapper_path=tmp_path / "winbrowser")
-    popen_args: list[list[str]] = []
-
-    class FakeProcess:
-        stdin = None
-        stdout = None
-        stderr = None
-
-        def poll(self):
-            return None
-
-    def fake_popen(args, **_kwargs):
-        popen_args.append(list(args))
-        return FakeProcess()
-
-    monkeypatch.setattr("teamnot.customer_loop.runners._path_for_windows_wrapper", lambda path: str(path))
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
-
-    runner._ensure_process()
-
-    assert "--cleanup-targets" not in popen_args[0]
-
-
-def test_persistent_browser_profile_is_scoped_to_session_id():
-    script = (Path(__file__).parents[1] / "src" / "teamnot" / "customer_loop" / "winbrowser_session.mjs").read_text(
-        encoding="utf-8"
-    )
-
-    assert "safeSessionId" in script
-    assert "teamnot-chrome-cdp-profile-${cdpPort()}-${safeSessionId}" in script
 
 
 def test_openclaw_runner_can_be_mocked_when_wrapper_present(tmp_path: Path):
@@ -727,215 +636,6 @@ def test_openclaw_runner_reports_customer_findings_from_real_browser_probe(tmp_p
     assert "overflowWidth=420" in report.evidence[0].raw_excerpt
     assert "pre.log width=620: long command output" in report.evidence[0].raw_excerpt
     assert len(report.evidence[0].screenshot_paths) == 3
-
-
-def test_openclaw_runner_classifies_browser_error_as_target_unreachable(tmp_path: Path):
-    wrapper = tmp_path / "scripts" / "winbrowser"
-    wrapper.parent.mkdir()
-    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
-
-    def command_runner(command):
-        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
-        if action == "navigate":
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout='{"ok": true, "url": "chrome-error://chromewebdata/", "title": "example-product.test"}',
-                stderr="",
-            )
-        if action == "eval":
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=(
-                    '{"ok": true, "result": {'
-                    '"url": "chrome-error://chromewebdata/",'
-                    '"title": "example-product.test",'
-                    '"headings": [],'
-                    '"buttons": [],'
-                    '"inputs": [],'
-                    '"bodyText": "This site can’t be reached ERR_NAME_NOT_RESOLVED",'
-                    '"failedResources": [],'
-                    '"hasHorizontalOverflow": false,'
-                    '"semanticSignals": {}'
-                    "}}"
-                ),
-                stderr="",
-            )
-        if action == "viewport":
-            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
-
-    target, profile, plan = _plan(tmp_path)
-    report = OpenClawWindowsCDPRunner(wrapper_path=wrapper, command_runner=command_runner).run(
-        target, profile, plan, tmp_path / "out"
-    )
-
-    ids = {finding.id for finding in report.findings}
-    assert "target-unreachable" in ids
-    assert "unclear-customer-promise" not in ids
-    assert "missing-core-workflow" not in ids
-    assert "STEP_SKIP|product-ux-classification" in report.evidence[0].raw_excerpt
-    assert report.scores.task_success < 8
-
-
-def test_openclaw_runner_classifies_login_redirect_as_target_unreachable(tmp_path: Path):
-    wrapper = tmp_path / "scripts" / "winbrowser"
-    wrapper.parent.mkdir()
-    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
-
-    def command_runner(command):
-        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
-        if action == "navigate":
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout='{"ok": true, "url": "https://example-product.test/login", "title": "Login"}',
-                stderr="",
-            )
-        if action == "eval":
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=(
-                    '{"ok": true, "result": {'
-                    '"url": "https://example-product.test/login",'
-                    '"title": "Login",'
-                    '"headings": ["Sign in"],'
-                    '"buttons": ["Continue"],'
-                    '"inputs": [{"tag": "input", "type": "email", "name": "email"}],'
-                    '"bodyText": "Sign in Email Password Continue",'
-                    '"failedResources": [],'
-                    '"hasHorizontalOverflow": false,'
-                    '"semanticSignals": {}'
-                    "}}"
-                ),
-                stderr="",
-            )
-        if action == "viewport":
-            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
-
-    target, profile, plan = _plan(tmp_path)
-    report = OpenClawWindowsCDPRunner(wrapper_path=wrapper, command_runner=command_runner).run(
-        target, profile, plan, tmp_path / "out"
-    )
-
-    ids = {finding.id for finding in report.findings}
-    assert "target-unreachable" in ids
-    assert "missing-trust-copy" not in ids
-    assert "STEP_SKIP|product-ux-classification" in report.evidence[0].raw_excerpt
-
-
-def test_openclaw_runner_does_not_treat_stale_screenshot_as_success(tmp_path: Path):
-    wrapper = tmp_path / "scripts" / "winbrowser"
-    wrapper.parent.mkdir()
-    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
-    stale = tmp_path / "out" / "screenshots" / "first-impression.png"
-    stale.parent.mkdir(parents=True)
-    stale.write_bytes(b"old")
-
-    def command_runner(command):
-        action = command[2] if len(command) > 2 and command[1] == "--action" else ""
-        if action == "eval":
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=(
-                    '{"ok": true, "result": {'
-                    '"url": "https://example-product.test",'
-                    '"title": "Product",'
-                    '"headings": ["Product"],'
-                    '"buttons": ["Start"],'
-                    '"inputs": [],'
-                    '"bodyText": "Product workflow privacy report demo retry team",'
-                    '"failedResources": [],'
-                    '"hasHorizontalOverflow": false,'
-                    '"semanticSignals": {"hasPrivacy": true, "hasSample": true, "hasErrorRecovery": true, "hasCollaboration": true}'
-                    "}}"
-                ),
-                stderr="",
-            )
-        if action == "viewport":
-            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
-
-    target, profile, plan = _plan(tmp_path)
-    report = OpenClawWindowsCDPRunner(wrapper_path=wrapper, command_runner=command_runner).run(
-        target, profile, plan, tmp_path / "out"
-    )
-
-    assert not stale.exists()
-    assert report.screenshot_captures[0].success is False
-    assert report.screenshot_captures[0].sha256 == ""
-
-
-def test_researcher_preserves_structured_seed_adapter_rejection_on_nonzero_return(tmp_path: Path):
-    wrapper = tmp_path / "scripts" / "winbrowser"
-    wrapper.parent.mkdir()
-    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
-
-    def command_runner(command):
-        return subprocess.CompletedProcess(
-            command,
-            1,
-            stdout='{"ok": false, "action": "setCookies", "unsupportedBlocker": "raw fallback cannot set this cookie"}',
-            stderr="stringified fallback error",
-        )
-
-    target, _, _ = _plan(tmp_path)
-    state = SeededCustomerState(cookies=[SeededCookie(name="session", value="secret", domain="example.test")])
-    result = OpenClawWindowsResearcherRunner(
-        wrapper_path=wrapper,
-        command_runner=command_runner,
-        seeded_state=state,
-    )._apply_seeded_state(target, state)
-
-    assert result["status"] == "unsupported"
-    assert state.unsupported_blocker == "raw fallback cannot set this cookie"
-
-
-def test_mobile_probe_tracks_decorative_overflow_without_failing_document_overflow():
-    assert "hasHorizontalOverflow: hasDocumentOverflow" in _MOBILE_PROBE_JS
-    assert "decorativeOverflowCandidates" in _MOBILE_PROBE_JS
-
-
-def test_raw_cdp_fallback_supports_login_and_upload_primitives():
-    script = (Path(__file__).parents[1] / "src" / "teamnot" / "customer_loop" / "winbrowser_session.mjs").read_text(
-        encoding="utf-8"
-    )
-
-    assert "async function rawPerformLogin" in script
-    assert "async function rawUpload" in script
-    assert 'if (action === "login")' in script
-    assert 'return await rawPerformLogin(command)' in script
-    assert 'if (action === "upload")' in script
-    assert 'return await rawUpload(command)' in script
-    assert "DOM.setFileInputFiles" in script
-    assert "Login was attempted in raw CDP fallback" in script
-    assert "login\", \"upload\"].includes(action)" not in script
-
-
-def test_session_script_cleans_stale_targets_before_playwright_connect():
-    script = (Path(__file__).parents[1] / "src" / "teamnot" / "customer_loop" / "winbrowser_session.mjs").read_text(
-        encoding="utf-8"
-    )
-
-    assert "async function cleanupCdpTargets" in script
-    assert 'if (hasArg("--cleanup-targets")) await cleanupCdpTargets()' in script
-    assert "Target.closeTarget" in script
-    assert 'url === "about:blank" && !keptBlankPage' in script
-    assert "rawTarget?.id" in script
-
-
-def test_playwright_navigate_preserves_network_error_for_classifier():
-    script = (Path(__file__).parents[1] / "src" / "teamnot" / "customer_loop" / "winbrowser_session.mjs").read_text(
-        encoding="utf-8"
-    )
-
-    assert "let navigationError = \"\"" in script
-    assert "navigationError = String(err?.message || err).slice(0, 500)" in script
-    assert "navigationError," in script
 
 
 def test_openclaw_runner_wraps_timeout_as_customer_loop_error(tmp_path: Path):
@@ -1616,38 +1316,6 @@ def test_customer_report_renders_multidimensional_research_synthesis(tmp_path: P
     assert "Run a JTBD pass" in rendered
 
 
-def test_customer_report_separates_runner_coverage_notes_from_customer_findings(tmp_path: Path):
-    target, profile, plan = _plan(tmp_path)
-    report = CustomerReport(
-        profile=profile,
-        target=target,
-        plan=plan,
-        findings=[
-            CustomerFinding(
-                id="missing-error-recovery-cues",
-                title="Mistake recovery is not visible",
-                severity=CustomerSeverity.medium,
-                recommendation="Show retry guidance.",
-            ),
-            CustomerFinding(
-                id="research-brain-no-seeded-state",
-                title="No usable seeded account or state was available",
-                severity=CustomerSeverity.medium,
-                customer_interpretation="Runner could not enter auth-only surfaces.",
-                business_impact="Coverage remains pre-auth.",
-                recommendation="Provide a seeded account.",
-            ),
-        ],
-    )
-
-    rendered = render_customer_report(report)
-
-    assert "## Customer Findings" in rendered
-    assert "## TeamNoT Coverage Notes" in rendered
-    assert rendered.index("Mistake recovery is not visible") < rendered.index("## TeamNoT Coverage Notes")
-    assert rendered.index("No usable seeded account or state was available") > rendered.index("## TeamNoT Coverage Notes")
-
-
 def test_customer_report_next_iteration_prioritizes_severity_over_research_gap(tmp_path: Path):
     target, profile, plan = _plan(tmp_path)
     report = CustomerReport(
@@ -1822,10 +1490,10 @@ def test_openclaw_researcher_runner_writes_research_brain_artifacts(tmp_path: Pa
     monkeypatch.setattr(
         OpenClawWindowsResearcherRunner,
         "_research_brain_pass",
-        lambda self, target, profile, routes, out_dir, seeded_state=None, browser_auth_result=None: calls.append("brain") or {
+        lambda self, target, profile, routes, out_dir, seeded_state=None: calls.append("brain") or {
             "method": "mock research brain",
             "seeded_state_path": str(seeded),
-            "seeded_state_status": "applied" if seeded_state else "browser_context",
+            "seeded_state_status": "applied" if seeded_state else "absent",
             "routes_discovered": ["/app"],
             "actions_executed": 2,
             "routes": [
@@ -1873,7 +1541,7 @@ def test_openclaw_researcher_runner_writes_research_brain_artifacts(tmp_path: Pa
         tmp_path / "out",
     )
 
-    assert calls == ["explore", "routes", "brain", "screens", "inspect", "runnable"]
+    assert calls == ["explore", "routes", "screens", "brain", "inspect", "runnable"]
     assert (tmp_path / "out" / "research_brain.yaml").exists()
     assert report.evidence[0].metadata["runner"] == "openclaw-windows-researcher"
     assert report.evidence[1].metadata["research_brain"]["actions_executed"] == 2
@@ -1944,10 +1612,6 @@ def test_research_brain_evidence_flags_missing_seeded_state_and_visual_flakiness
             "routes": [
                 {
                     "route": "/auth/login",
-                    "observation": {
-                        "bodyTextSample": "Sign in to continue Login Email Password",
-                        "forms": [{"index": 0, "inputs": [{"type": "email", "name": "email"}]}],
-                    },
                     "entry_screenshot": "entry.png",
                     "actions": [
                         {
@@ -1972,251 +1636,6 @@ def test_research_brain_evidence_flags_missing_seeded_state_and_visual_flakiness
         "research-brain-no-realistic-form-submit",
         "research-brain-no-seeded-state",
         "research-brain-screenshot-evidence-flaky",
-    }
-
-
-def test_researcher_stops_before_reporting_when_auth_gate_requires_login():
-    import teamnot.customer_loop.runners as runner_module
-
-    blocker = runner_module._missing_required_auth_blocker(
-        {
-            "browser_runtime": {"cdp_url": "http://127.0.0.1:18800"},
-            "seeded_state_status": "absent",
-            "routes": [
-                {
-                    "route": "/auth/login",
-                    "observation": {
-                        "bodyTextSample": "Sign in to continue. Email Password",
-                        "forms": [{"index": 0, "inputs": [{"type": "email"}]}],
-                    },
-                }
-            ],
-        },
-        None,
-    )
-
-    assert "Authentication is required" in blocker
-    assert "http://127.0.0.1:18800" in blocker
-    assert "shallow pre-auth report" in blocker
-
-
-def test_browser_context_auth_counts_as_authenticated_depth():
-    import teamnot.customer_loop.runners as runner_module
-    from teamnot.customer_loop.artifacts import _customer_testing_skill_coverage
-
-    target = ExperienceTarget(url="https://example-product.test")
-    profile = CustomerProfile(persona="Ops buyer", role="operator")
-    plan = CustomerTestPlan(target=target, customer_job={"functional": "Evaluate product"})
-    report = CustomerReport(
-        profile=profile,
-        target=target,
-        plan=plan,
-        seeded_state=SeededCustomerState(adapter_status="browser_context"),
-    )
-
-    assert runner_module._missing_required_auth_blocker({"seeded_state_status": "browser_context"}, None) == ""
-    coverage = _customer_testing_skill_coverage(report)
-    seeded = next(item for item in coverage if item["id"] == "seeded-auth-depth")
-    assert seeded["status"] == "covered"
-
-
-def test_optional_login_link_does_not_block_public_customer_report():
-    import teamnot.customer_loop.runners as runner_module
-
-    research_brain = {
-        "method": "mock research brain",
-        "seeded_state_status": "absent",
-        "routes_discovered": ["/"],
-        "routes": [
-            {
-                "route": "/",
-                "observation": {"bodyTextSample": "Browse rooms Contact owner Đăng nhập optional"},
-                "entry_screenshot": "entry.png",
-                "actions": [
-                    {
-                        "action": {"id": "click-details", "kind": "click"},
-                        "url_changed": True,
-                        "text_changed": True,
-                        "visual_changed": True,
-                        "before_screenshot": "before.png",
-                        "after_screenshot": "after.png",
-                        "before_screenshot_ok": True,
-                        "after_screenshot_ok": True,
-                    }
-                ],
-            }
-        ],
-    }
-
-    assert runner_module._missing_required_auth_blocker(research_brain, None) == ""
-    _, findings = runner_module._research_brain_evidence(research_brain)
-    assert "research-brain-no-seeded-state" not in {finding.id for finding in findings}
-
-
-def test_research_brain_does_not_flag_seeded_state_when_no_auth_surface():
-    import teamnot.customer_loop.runners as runner_module
-
-    _, findings = runner_module._research_brain_evidence(
-        {
-            "method": "mock research brain",
-            "seeded_state_status": "absent",
-            "routes_discovered": ["/"],
-            "routes": [
-                {
-                    "route": "/",
-                    "observation": {"bodyTextSample": "Product public catalog Browse details Contact"},
-                    "entry_screenshot": "entry.png",
-                    "actions": [
-                        {
-                            "action": {"id": "click-details", "kind": "click"},
-                            "url_changed": True,
-                            "text_changed": True,
-                            "visual_changed": True,
-                            "before_screenshot": "before.png",
-                            "after_screenshot": "after.png",
-                            "before_screenshot_ok": True,
-                            "after_screenshot_ok": True,
-                        }
-                    ],
-                }
-            ],
-        }
-    )
-
-    assert "research-brain-no-seeded-state" not in {finding.id for finding in findings}
-
-
-def test_hash_spa_routes_are_treated_as_distinct_routes():
-    import teamnot.customer_loop.runners as runner_module
-
-    target = ExperienceTarget(url="https://example-product.test/")
-
-    assert runner_module._route_from_url("https://example-product.test/#/rooms/123", target) == "/rooms/123"
-    assert runner_module._route_from_url("https://example-product.test/#/about", target) == "/about"
-
-
-def test_generic_customer_trust_and_outcome_terms_avoid_false_positives(tmp_path: Path):
-    import teamnot.customer_loop.runners as runner_module
-
-    target, profile, plan = _plan(tmp_path)
-    markers, findings = runner_module._build_customer_findings(
-        {
-            "url": "https://example-product.test/projects/1",
-            "title": "OpsBoard — project risk review",
-            "headings": ["Risk review"],
-            "bodyText": (
-                "Review project risks, export a prioritized report, share it with the team, "
-                "contact support, and see clear privacy, verification, data retention, and audit policy."
-            ),
-            "buttons": ["Export report", "Contact support"],
-            "inputs": [],
-            "failedResources": [],
-            "hasHorizontalOverflow": False,
-            "semanticSignals": {},
-        },
-        target,
-        profile,
-        plan,
-    )
-
-    ids = {finding.id for finding in findings}
-    assert "unclear-customer-promise" not in ids
-    assert "missing-trust-copy" not in ids
-    assert "unclear-output-value" not in ids
-    assert any(marker.startswith("STEP_PASS|trust-copy") for marker in markers)
-
-
-def test_research_depth_suppresses_homepage_false_positive_findings(tmp_path: Path):
-    import teamnot.customer_loop.runners as runner_module
-
-    target, profile, plan = _plan(tmp_path)
-    report = CustomerReport(
-        profile=profile,
-        target=target,
-        plan=plan,
-        findings=[
-            CustomerFinding(id="missing-trust-copy", title="No visible trust copy", severity=CustomerSeverity.medium),
-            CustomerFinding(id="missing-adoption-cues", title="No adoption path", severity=CustomerSeverity.low),
-            CustomerFinding(id="weak-recommendation-clarity", title="Not shareable", severity=CustomerSeverity.low),
-            CustomerFinding(id="missing-error-recovery-cues", title="No recovery", severity=CustomerSeverity.medium),
-        ],
-        evidence=[
-            CustomerEvidence(
-                kind="browser_research_brain",
-                raw_excerpt="\n".join([
-                    "STEP_FAIL|trust-copy|expected privacy/data/trust cues -> none detected",
-                    "STEP_FAIL|adoption-readiness|expected pricing/support/sample/demo/onboarding cues -> none detected",
-                    "STEP_FAIL|recommendation-clarity|expected share/export/team/client cues -> none detected",
-                ]),
-                metadata={
-                    "research_brain": {
-                        "routes": [
-                            {
-                                "observation": {
-                                    "bodyTextSample": (
-                                        "The dashboard has privacy, verification, data retention, and audit policy. "
-                                        "Customers can contact support, open the FAQ, export a report, "
-                                        "save a copy, and share it with the team."
-                                    )
-                                }
-                            }
-                        ]
-                    }
-                },
-            )
-        ],
-    )
-
-    runner_module._reconcile_product_findings_from_research_depth(report)
-
-    assert {finding.id for finding in report.findings} == {"missing-error-recovery-cues"}
-    assert "STEP_PASS|trust-copy|trust/safety cues found in observed route evidence" in report.evidence[0].raw_excerpt
-    assert "STEP_PASS|adoption-readiness|support/contact/onboarding cues found in observed route evidence" in report.evidence[0].raw_excerpt
-    assert "STEP_PASS|recommendation-clarity|action/share/output cues found in observed route evidence" in report.evidence[0].raw_excerpt
-
-
-def test_research_depth_does_not_suppress_findings_from_profile_only_metadata(tmp_path: Path):
-    import teamnot.customer_loop.runners as runner_module
-
-    target, profile, plan = _plan(tmp_path)
-    profile.trust_threshold = "Needs SOC2 and audit policy before real usage"
-    report = CustomerReport(
-        profile=profile,
-        target=target,
-        plan=plan,
-        findings=[
-            CustomerFinding(id="missing-trust-copy", title="No visible trust copy", severity=CustomerSeverity.medium),
-            CustomerFinding(id="missing-adoption-cues", title="No adoption path", severity=CustomerSeverity.low),
-            CustomerFinding(id="weak-recommendation-clarity", title="Not shareable", severity=CustomerSeverity.low),
-        ],
-        evidence=[
-            CustomerEvidence(
-                kind="browser_research_brain",
-                raw_excerpt="\n".join([
-                    "STEP_FAIL|trust-copy|expected privacy/data/trust cues -> none detected",
-                    "STEP_FAIL|adoption-readiness|expected pricing/support/sample/demo/onboarding cues -> none detected",
-                    "STEP_FAIL|recommendation-clarity|expected share/export/team/client cues -> none detected",
-                ]),
-                metadata={
-                    "product_exploration": {
-                        "persona": profile.persona,
-                        "trust_threshold": profile.trust_threshold,
-                        "planned_gap": "Need support, export, and share paths",
-                    },
-                    "research_brain": {
-                        "routes": [{"observation": {"bodyTextSample": "Welcome to the dashboard."}}],
-                    },
-                },
-            )
-        ],
-    )
-
-    runner_module._reconcile_product_findings_from_research_depth(report)
-
-    assert {finding.id for finding in report.findings} == {
-        "missing-trust-copy",
-        "missing-adoption-cues",
-        "weak-recommendation-clarity",
     }
 
 

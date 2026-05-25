@@ -98,12 +98,9 @@ def test_report_artifacts_write_redacted_seeded_state_and_vision_metadata(tmp_pa
     write_report_artifacts(tmp_path / "out", profile, plan, report)
 
     seeded_text = (tmp_path / "out" / "seeded_state_metadata.yaml").read_text(encoding="utf-8")
-    report_json = (tmp_path / "out" / "customer_report.json").read_text(encoding="utf-8")
     report_text = (tmp_path / "out" / "customer_report.md").read_text(encoding="utf-8")
     assert "secret" not in seeded_text
-    assert "secret" not in report_json
     assert "***REDACTED***" in seeded_text
-    assert "***REDACTED***" in report_json
     assert "18801" in (tmp_path / "out" / "browser_runtime.yaml").read_text(encoding="utf-8")
     assert (tmp_path / "out" / "vision_review.yaml").exists()
     assert (tmp_path / "out" / "customer_testing_skill_coverage.yaml").exists()

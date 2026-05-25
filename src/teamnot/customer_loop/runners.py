@@ -9,6 +9,7 @@ import subprocess
 import unicodedata
 from collections.abc import Callable, Sequence
 from hashlib import sha256
+from inspect import signature
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urljoin, urlparse
@@ -942,14 +943,21 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
             browser_auth_result = self._attempt_browser_assisted_auth(target, seeded_state)
             exploration = _safe_explore_product(target, profile, self.wrapper_path, self.command_runner)
             planned_routes = routes_from_exploration(exploration, max_routes=9)
-            research_brain = self._research_brain_pass(
-                target,
-                profile,
-                planned_routes,
-                out_dir,
-                seeded_state,
-                browser_auth_result=browser_auth_result,
-            )
+            research_brain_method = self._research_brain_pass
+            supports_browser_auth = "browser_auth_result" in signature(research_brain_method).parameters
+            screen_exploration: dict | None = None
+            if supports_browser_auth:
+                research_brain = research_brain_method(
+                    target,
+                    profile,
+                    planned_routes,
+                    out_dir,
+                    seeded_state,
+                    browser_auth_result=browser_auth_result,
+                )
+            else:
+                screen_exploration = self._explore_screens(target, planned_routes, out_dir)
+                research_brain = research_brain_method(target, profile, planned_routes, out_dir, seeded_state)
             if seeded_state_result:
                 research_brain["seeded_state_application"] = seeded_state_result
             research_brain["browser_assisted_auth"] = browser_auth_result
@@ -960,9 +968,11 @@ class OpenClawWindowsResearcherRunner(OpenClawWindowsSessionRunner):
                 raise CustomerLoopRunnerError(auth_blocker)
             routes_for_flow = _dedupe_strings([
                 *planned_routes,
+                *((screen_exploration or {}).get("routes_discovered", [])),
                 *research_brain.get("routes_discovered", []),
             ])[:9]
-            screen_exploration = self._explore_screens(target, routes_for_flow, out_dir)
+            if screen_exploration is None:
+                screen_exploration = self._explore_screens(target, routes_for_flow, out_dir)
             routes_for_flow = _dedupe_strings([
                 *routes_for_flow,
                 *screen_exploration.get("routes_discovered", []),
@@ -2070,6 +2080,10 @@ def _research_brain_evidence(research_brain: dict) -> tuple[CustomerEvidence, li
         action for action in actions
         if action.get("action", {}).get("kind") == "filled_submit"
     ]
+    empty_submit_actions = [
+        action for action in actions
+        if action.get("action", {}).get("kind") == "empty_submit"
+    ]
     changed_actions = [
         action for action in actions
         if action.get("url_changed") or action.get("text_changed") or action.get("visual_changed")
@@ -2174,7 +2188,7 @@ def _research_brain_evidence(research_brain: dict) -> tuple[CustomerEvidence, li
         for route in routes
         if isinstance(route, dict) and isinstance(route.get("observation"), dict)
     )
-    if not filled_submit_actions and (has_form_surface or has_input_surface):
+    if not filled_submit_actions and (empty_submit_actions or has_form_surface or has_input_surface):
         findings.append(_browser_finding(
             "research-brain-no-realistic-form-submit",
             "No realistic filled form submission was executed",
