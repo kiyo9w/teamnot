@@ -153,23 +153,46 @@ async function probeCdp() {
   }
 }
 
-function browserExe() {
-  if (process.env.TEAMNOT_BROWSER_EXE) return process.env.TEAMNOT_BROWSER_EXE;
+function browserExeCandidates() {
+  if (process.env.TEAMNOT_BROWSER_EXE) return [process.env.TEAMNOT_BROWSER_EXE];
   const platform = process.platform;
   if (platform === "win32") {
-    if (browserName === "brave") return "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
-    if (browserName === "edge") return "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe";
-    return "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+    if (browserName === "brave") return [
+      "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+      "C:\\Program Files (x86)\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+      path.join(localAppData, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+    ];
+    if (browserName === "edge") return [
+      "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+      "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+      path.join(localAppData, "Microsoft", "Edge", "Application", "msedge.exe"),
+    ];
+    return [
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+      path.join(localAppData, "Google", "Chrome", "Application", "chrome.exe"),
+    ];
   }
   if (platform === "darwin") {
-    if (browserName === "brave") return "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
-    if (browserName === "edge") return "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge";
-    return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+    if (browserName === "brave") return [
+      "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+      path.join(os.homedir(), "Applications", "Brave Browser.app", "Contents", "MacOS", "Brave Browser"),
+    ];
+    if (browserName === "edge") return [
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+      path.join(os.homedir(), "Applications", "Microsoft Edge.app", "Contents", "MacOS", "Microsoft Edge"),
+    ];
+    return [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      path.join(os.homedir(), "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome"),
+      "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+    ];
   }
-  if (browserName === "brave") return "brave-browser";
-  if (browserName === "edge") return "microsoft-edge";
-  if (browserName === "chromium") return "chromium";
-  return "google-chrome";
+  if (browserName === "brave") return ["brave-browser", "brave", "chromium", "chromium-browser"];
+  if (browserName === "edge") return ["microsoft-edge", "microsoft-edge-stable"];
+  if (browserName === "chromium") return ["chromium", "chromium-browser"];
+  return ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"];
 }
 
 function cdpPort() {
@@ -191,23 +214,32 @@ function profileDirForReport(ensured) {
 
 async function startBrowser() {
   await fs.mkdir(userDataDir, { recursive: true });
-  const executable = browserExe();
-  const child = spawn(executable, [
-    "--remote-debugging-address=127.0.0.1",
-    `--remote-debugging-port=${cdpPort()}`,
-    `--user-data-dir=${userDataDir}`,
-    "--no-first-run",
-    "--no-default-browser-check",
-    "about:blank",
-  ], { detached: true, stdio: "ignore" });
-  await new Promise((resolve, reject) => {
-    child.once("error", (err) => {
-      reject(new Error(`Could not start browser executable "${executable}". Set TEAMNOT_BROWSER_EXE or install Chrome/Edge/Brave. ${String(err?.message || err)}`));
-    });
-    setTimeout(resolve, 0);
-  });
-  child.unref();
-  return { pid: child.pid, userDataDir };
+  const attempts = [];
+  for (const executable of browserExeCandidates()) {
+    try {
+      const child = spawn(executable, [
+        "--remote-debugging-address=127.0.0.1",
+        `--remote-debugging-port=${cdpPort()}`,
+        `--user-data-dir=${userDataDir}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+      ], { detached: true, stdio: "ignore" });
+      await new Promise((resolve, reject) => {
+        child.once("error", reject);
+        setTimeout(resolve, 50);
+      });
+      child.unref();
+      return { pid: child.pid, executable, userDataDir };
+    } catch (err) {
+      attempts.push(`${executable}: ${String(err?.message || err)}`);
+    }
+  }
+  throw new Error(
+    "Could not start Chrome/Edge/Brave for TeamNoT customer testing. "
+    + "Set TEAMNOT_BROWSER_EXE to the browser executable path or install a supported browser. "
+    + `Tried: ${attempts.join("; ")}`,
+  );
 }
 
 async function ensureCdp() {
